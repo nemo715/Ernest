@@ -39,3 +39,10 @@ _demo/
 .benchmarks/
 test-out.txt
 chat.json
+
+# Build artifacts and scratch logs
+*.log
+run.txt
+python/build/
+python/*.egg-info/
+pip.log
