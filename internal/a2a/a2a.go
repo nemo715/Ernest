@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/agent"
 )
 
 // ProtocolVersion is the A2A protocol version spoken by this server.

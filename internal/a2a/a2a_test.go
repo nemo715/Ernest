@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"ernest/internal/agent"
-	"ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/llm"
 )
 
 func testA2AServer(t *testing.T) *Server {

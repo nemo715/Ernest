@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"ernest/internal/core"
-	"ernest/internal/knowledge"
-	"ernest/internal/llm"
-	"ernest/internal/storage"
-	"ernest/internal/vector"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/knowledge"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/vector"
 )
 
 func mockScripted(t *testing.T, script []llm.MockTurn, def llm.MockTurn) *llm.MockProvider {

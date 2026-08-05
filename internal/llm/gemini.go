@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // GeminiConfig configures the Google Gemini provider.

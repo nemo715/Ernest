@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // Session is the persisted state of one conversation.

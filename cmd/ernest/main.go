@@ -19,13 +19,13 @@ import (
 	"strings"
 	"syscall"
 
-	"ernest/internal/agent"
-	"ernest/internal/config"
-	"ernest/internal/core"
-	"ernest/internal/eval"
-	"ernest/internal/mcp"
-	"ernest/internal/server"
-	"ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/config"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/eval"
+	"github.com/nemo715/Ernest/internal/mcp"
+	"github.com/nemo715/Ernest/internal/server"
+	"github.com/nemo715/Ernest/internal/storage"
 )
 
 const version = "0.1.0"
@@ -120,9 +120,9 @@ import (
 	"context"
 	"fmt"
 
-	"ernest/internal/agent"
-	"ernest/internal/core"
-	"ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
 )
 
 // A minimal programmatic agent. Swap the mock provider for a real one:
@@ -140,6 +140,11 @@ func main() {
 	fmt.Println(res.Output)
 }
 `
+
+// scaffoldMod is the go.mod written by init and every `ernest new`
+// template: the project is its own module and imports ernest from the
+// published module path, so scaffolds compile outside the ernest repo.
+const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.0\n"
 
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
@@ -161,6 +166,7 @@ func cmdInit(args []string) error {
 		"ernest.json":   scaffoldConfig,
 		".env.example":  scaffoldEnv,
 		"main.go":       scaffoldMain,
+		"go.mod":        scaffoldMod,
 	}
 	for name, content := range files {
 		path := filepath.Join(dir, name)
@@ -191,6 +197,7 @@ var newTemplates = map[string]struct {
 	"agent": {
 		summary: "single agent with tools + memory",
 		files: map[string]string{
+			"go.mod":      scaffoldMod,
 			"ernest.json": `{
   "agents": [
     {
@@ -212,9 +219,9 @@ import (
 	"context"
 	"fmt"
 
-	"ernest/internal/agent"
-	"ernest/internal/core"
-	"ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
 )
 
 // A minimal programmatic agent. Swap the mock provider for a real one:
@@ -244,6 +251,7 @@ func main() {
 	"team": {
 		summary: "leader agent delegating to specialist members",
 		files: map[string]string{
+			"go.mod":      scaffoldMod,
 			"ernest.json": `{
   "agents": [
     {
@@ -279,38 +287,65 @@ func main() {
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
-	"ernest/internal/agent"
-	"ernest/internal/core"
-	"ernest/internal/llm"
-	"ernest/internal/team"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/team"
 )
 
 // A multi-agent team: the leader decides when to delegate, using the
 // delegate tool that team.New injects automatically.
+//
+// The providers are scripted mocks so this runs offline, deterministically
+// and with no API key: turn 1 scripts the leader's delegate call, turn 2
+// its final answer; the researcher answers from its own script. Swap
+// llm.NewMock for a real provider (see .env.example) and the model decides
+// delegation itself.
 func main() {
-	p := llm.NewMock(llm.MockConfig{})
+	lead := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
+		{ToolCalls: []core.ToolCall{{
+			Name: "delegate",
+			Arguments: json.RawMessage("{\"member\":\"researcher\",\"task\":\"Research Go concurrency and report your findings.\"}"),
+		}}},
+		{Content: "Done. I delegated the research and synthesised the findings into a short summary.", FinishReason: "stop"},
+	}})
+	researcher := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
+		{Content: "Findings: Go concurrency is built on goroutines (cheap, multiplexed threads) and channels for safe communication; 'go f()' starts a goroutine, 'select' coordinates many.", FinishReason: "stop"},
+	}})
+	writer := llm.NewMock(llm.MockConfig{})
 
-	leader := agent.New("lead", p)
+	leader := agent.New("lead", lead)
 	leader.Instructions = "You coordinate the team and delegate tasks."
 	leader.Tools = core.BuiltinTools
 
-	researcher := agent.New("researcher", p)
-	researcher.Description = "Finds facts and figures"
-	researcher.Instructions = "You research topics and report findings."
-	researcher.Tools = []*core.Tool{core.ToolsByName(core.BuiltinTools)["http_fetch"]}
+	researcherAgent := agent.New("researcher", researcher)
+	researcherAgent.Description = "Finds facts and figures"
+	researcherAgent.Instructions = "You research topics and report findings."
 
-	writer := agent.New("writer", p)
-	writer.Description = "Turns notes into polished text"
-	writer.Instructions = "You write clear, concise prose."
+	writerAgent := agent.New("writer", writer)
+	writerAgent.Description = "Turns notes into polished text"
+	writerAgent.Instructions = "You write clear, concise prose."
 
-	t := team.New("editorial", leader, researcher, writer)
-	res, err := t.Chat(context.Background(), "Research Go concurrency and write a short summary.")
+	t := team.New("editorial", leader, researcherAgent, writerAgent)
+	ch, err := t.Stream(context.Background(), "Research Go concurrency and write a short summary.", team.RunOptions{})
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(res.Output)
+	for ev := range ch {
+		switch ev.Type {
+		case core.EventDelegateStart:
+			fmt.Printf("· delegate → %s: %s\n", ev.Agent, ev.Data)
+		case core.EventDelegateEnd:
+			fmt.Printf("· delegate ← %s done\n", ev.Agent)
+		case core.EventMessageDelta:
+			fmt.Print(ev.Delta)
+		case core.EventRunComplete:
+			fmt.Printf("\n· run.complete: %s\n", ev.Result.Status)
+		}
+	}
 }
 `,
 		},
@@ -318,6 +353,7 @@ func main() {
 	"workflow": {
 		summary: "explicit step DAG with guards, retries and agents",
 		files: map[string]string{
+			"go.mod":      scaffoldMod,
 			"ernest.json": `{
   "agents": [
     {
@@ -339,9 +375,9 @@ import (
 	"context"
 	"fmt"
 
-	"ernest/internal/agent"
-	"ernest/internal/llm"
-	"ernest/internal/workflow"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/workflow"
 )
 
 // A step DAG: plan -> research (via the agent) -> write. Steps share
@@ -397,6 +433,7 @@ func main() {
 	"server": {
 		summary: "HTTP API + playground backend (SSE, WS, HITL)",
 		files: map[string]string{
+			"go.mod":      scaffoldMod,
 			"ernest.json": `{
   "agents": [
     {
@@ -423,11 +460,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"ernest/internal/agent"
-	"ernest/internal/core"
-	"ernest/internal/llm"
-	"ernest/internal/server"
-	"ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/server"
+	"github.com/nemo715/Ernest/internal/storage"
 )
 
 // An embedded HTTP server exposing the full API: /api/chat (SSE),

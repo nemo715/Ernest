@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // InMemoryStore keeps sessions in RAM. It is the default store: zero

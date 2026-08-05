@@ -10,11 +10,11 @@ import (
 	"regexp"
 	"sync"
 
-	"ernest/internal/core"
-	"ernest/internal/knowledge"
-	"ernest/internal/llm"
-	"ernest/internal/memory"
-	"ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/knowledge"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/memory"
+	"github.com/nemo715/Ernest/internal/storage"
 )
 
 // CostConfig prices tokens so the runner can estimate spend and enforce

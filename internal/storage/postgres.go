@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // PostgresStore persists sessions to PostgreSQL via pgx (pure Go).

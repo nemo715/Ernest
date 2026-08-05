@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 func TestLinearDAG(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"ernest/internal/llm"
-	"ernest/internal/vector"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/vector"
 )
 
 func TestChunkTextEmptyAndShort(t *testing.T) {

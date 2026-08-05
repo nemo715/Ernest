@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"ernest/internal/agent"
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // Team orchestrates a leader and its members. The leader keeps full

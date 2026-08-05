@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"ernest/internal/core"
-	"ernest/internal/llm"
-	"ernest/internal/memory"
-	"ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/memory"
+	"github.com/nemo715/Ernest/internal/storage"
 )
 
 // errAwaitingApproval pauses the run until a human decision arrives.

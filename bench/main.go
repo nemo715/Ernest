@@ -19,9 +19,9 @@ import (
 	"sort"
 	"time"
 
-	"ernest/internal/agent"
-	"ernest/internal/core"
-	"ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
 )
 
 var real = flag.Bool("real", false, "benchmark against a real model (OpenRouter, requires OPENROUTER_API_KEY)")

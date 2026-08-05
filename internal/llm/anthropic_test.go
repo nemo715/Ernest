@@ -9,7 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 func TestAnthropicChat(t *testing.T) {

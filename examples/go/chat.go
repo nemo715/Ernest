@@ -13,10 +13,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"ernest/internal/agent"
-	"ernest/internal/core"
-	"ernest/internal/llm"
-	"ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/storage"
 )
 
 // emailArgs is the JSON Schema source for the send_email tool (the

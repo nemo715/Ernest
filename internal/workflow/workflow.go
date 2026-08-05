@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"ernest/internal/agent"
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // Step is one node in a workflow graph.

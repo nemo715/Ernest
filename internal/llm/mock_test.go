@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 func TestMockChatScripted(t *testing.T) {

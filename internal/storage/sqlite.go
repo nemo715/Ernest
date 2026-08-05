@@ -11,7 +11,7 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no cgo)
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // SQLiteStore persists sessions to a SQLite file using the pure-Go

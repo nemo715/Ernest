@@ -8,7 +8,7 @@ import (
 	"errors"
 	"io"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // ChatRequest is a single model call.

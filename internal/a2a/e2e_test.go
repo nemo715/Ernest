@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"ernest/internal/a2a"
-	"ernest/internal/agent"
-	"ernest/internal/llm"
-	"ernest/internal/server"
+	"github.com/nemo715/Ernest/internal/a2a"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/server"
 )
 
 func newServerWithAgent(t *testing.T) *server.Server {

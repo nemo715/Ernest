@@ -1,4 +1,4 @@
-module ernest
+module github.com/nemo715/Ernest
 
 go 1.26.5
 

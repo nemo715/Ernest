@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // roundtrip asserts full session fidelity through any SessionStore:

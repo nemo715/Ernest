@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"ernest/internal/agent"
-	"ernest/internal/core"
-	"ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
 )
 
 func TestTeamChatDelegatesAndSynthesises(t *testing.T) {

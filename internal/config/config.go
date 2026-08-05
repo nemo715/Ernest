@@ -10,13 +10,13 @@ import (
 	"os"
 	"strings"
 
-	"ernest/internal/agent"
-	"ernest/internal/a2a"
-	"ernest/internal/browser"
-	"ernest/internal/core"
-	"ernest/internal/llm"
-	"ernest/internal/mcp"
-	"ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/a2a"
+	"github.com/nemo715/Ernest/internal/browser"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/mcp"
+	"github.com/nemo715/Ernest/internal/storage"
 )
 
 // DefaultFile is the default config file name.

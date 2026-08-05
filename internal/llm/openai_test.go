@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // oaiTestServer is a scriptable OpenAI-compatible endpoint.

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // stdioTransport runs an MCP server as a child process and exchanges

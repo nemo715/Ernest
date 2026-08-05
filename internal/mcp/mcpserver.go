@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"ernest/internal/agent"
+	"github.com/nemo715/Ernest/internal/agent"
 )
 
 // ServerOptions configures the MCP server.

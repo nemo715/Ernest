@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/core"
 )
 
 // CallTool is the "a2a_call" tool: it sends a message to a remote

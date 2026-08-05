@@ -6,8 +6,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"ernest/internal/core"
-	"ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/storage"
 )
 
 // Strategy trims conversation history before it is sent to the model.
