@@ -2,18 +2,42 @@
 // results, tools. It forwards to the implementation in ernest/internal/core.
 package core
 
-import internal "github.com/nemo715/Ernest/internal/core"
+import (
+	"context"
+
+	internal "github.com/nemo715/Ernest/internal/core"
+	internalBrowser "github.com/nemo715/Ernest/internal/browser"
+)
 
 type (
-	Tool       = internal.Tool
-	ToolCall   = internal.ToolCall
-	ToolResult = internal.ToolResult
-	RunEvent   = internal.RunEvent
-	RunResult  = internal.RunResult
-	RunMetrics = internal.RunMetrics
-	Usage      = internal.Usage
-	Message    = internal.Message
+	Tool             = internal.Tool
+	ToolCall         = internal.ToolCall
+	ToolResult       = internal.ToolResult
+	ToolContext      = internal.ToolContext
+	RunEvent         = internal.RunEvent
+	RunResult        = internal.RunResult
+	RunMetrics       = internal.RunMetrics
+	Usage            = internal.Usage
+	Message          = internal.Message
+	ApprovalRequest  = internal.ApprovalRequest
+	ApprovalRequiredError = internal.ApprovalRequiredError
 )
+
+// NewTool registers a custom tool: the model sees {name, description} and
+// calls it with JSON args of T; fn executes it (returns any JSON-marshalable
+// result). Custom tools are how ernest apps gain new hands.
+func NewTool[T any](name, description string, fn func(ctx context.Context, tc *ToolContext, args T) (any, error)) (*Tool, error) {
+	return internal.NewTool(name, description, fn)
+}
+
+// MustTool is NewTool but panics on construction errors.
+func MustTool[T any](name, description string, fn func(ctx context.Context, tc *ToolContext, args T) (any, error)) *Tool {
+	return internal.MustTool(name, description, fn)
+}
+
+// BrowserTool drives a lazy shared Edge/Chrome via CDP (go-rod): navigate,
+// read HTML, screenshot, evaluate JS. The browser only launches on first use.
+var BrowserTool = internalBrowser.Tool
 
 const (
 	EventRunStart           = internal.EventRunStart

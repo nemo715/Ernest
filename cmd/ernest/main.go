@@ -28,7 +28,7 @@ import (
 	"github.com/nemo715/Ernest/internal/storage"
 )
 
-const version = "0.1.2"
+const version = "0.1.3"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -144,7 +144,7 @@ func main() {
 // scaffoldMod is the go.mod written by init and every `ernest new`
 // template: the project is its own module and imports ernest from the
 // published module path, so scaffolds compile outside the ernest repo.
-const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.2\n"
+const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.3\n"
 
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
