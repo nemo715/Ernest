@@ -95,8 +95,10 @@ go run .                               # live delegation transcript on the termi
 
 The scaffolded project is its own Go module and imports ernest from the
 published module path, so it compiles **anywhere** — no need to be inside
-this repo. The bundled scripted mock providers show the leader delegating
-and streaming the result, offline and without an API key.
+this repo. With `OPENROUTER_API_KEY` set, the same scaffold runs on a real
+model (gpt-4o-mini via OpenRouter) and **the model decides delegation
+itself**; without a key it falls back to scripted mock providers, so it also
+runs offline and deterministically for demos and CI.
 
 ## Python SDK
 

@@ -193,10 +193,12 @@ for ev := range desk.Stream(ctx, team.TeamOptions{
 ```
 
 The leader calls members through the `delegate` tool; delegation streams live
-as `delegate.start`/`delegate.end` events. The scaffold's scripted mock
-providers demonstrate this offline — the leader's scripted turn calls
-`delegate`, the member answers, and the stream prints both events. Swap
-`llm.NewMock` for a real provider and the model decides delegation itself.
+as `delegate.start`/`delegate.end` events. The scaffold adapts to its
+environment: with `OPENROUTER_API_KEY` set it builds three real providers
+(gpt-4o-mini via OpenRouter) and **the model decides delegation itself**;
+without a key it uses scripted mock providers — the leader's scripted turn
+calls `delegate`, the member answers, and the stream prints both events — so
+the same code runs offline and deterministically for demos and CI.
 
 ## 6. Tools
 
