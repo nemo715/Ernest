@@ -28,7 +28,7 @@ import (
 	"github.com/nemo715/Ernest/internal/storage"
 )
 
-const version = "0.1.1"
+const version = "0.1.2"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -144,7 +144,7 @@ func main() {
 // scaffoldMod is the go.mod written by init and every `ernest new`
 // template: the project is its own module and imports ernest from the
 // published module path, so scaffolds compile outside the ernest repo.
-const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.1\n"
+const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.2\n"
 
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
@@ -289,6 +289,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/nemo715/Ernest/agent"
 	"github.com/nemo715/Ernest/core"
@@ -299,33 +300,45 @@ import (
 // A multi-agent team: the leader decides when to delegate, using the
 // delegate tool that team.New injects automatically.
 //
-// The providers are scripted mocks so this runs offline, deterministically
-// and with no API key: turn 1 scripts the leader's delegate call, turn 2
-// its final answer; the researcher answers from its own script. Swap
-// llm.NewMock for a real provider (see .env.example) and the model decides
-// delegation itself.
+// With OPENROUTER_API_KEY set, the team runs on a real model
+// (gpt-4o-mini via OpenRouter) and the model decides delegation itself.
+// Without a key it falls back to scripted mock providers, so the scaffold
+// also runs offline and deterministically for demos and CI.
 func main() {
-	lead := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
-		{ToolCalls: []core.ToolCall{{
-			Name: "delegate",
-			Arguments: json.RawMessage("{\"member\":\"researcher\",\"task\":\"Research Go concurrency and report your findings.\"}"),
-		}}},
-		{Content: "Done. I delegated the research and synthesised the findings into a short summary.", FinishReason: "stop"},
-	}})
-	researcher := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
-		{Content: "Findings: Go concurrency is built on goroutines (cheap, multiplexed threads) and channels for safe communication; 'go f()' starts a goroutine, 'select' coordinates many.", FinishReason: "stop"},
-	}})
-	writer := llm.NewMock(llm.MockConfig{})
+	var leadP, researchP, writerP llm.Provider
+	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+		cfg := llm.OpenAICompatConfig{
+			BaseURL: "https://openrouter.ai/api/v1",
+			APIKey:  key,
+			Model:   "openai/gpt-4o-mini",
+		}
+		leadP = llm.NewOpenAICompat(cfg)
+		researchP = llm.NewOpenAICompat(cfg)
+		writerP = llm.NewOpenAICompat(cfg)
+	} else {
+		fmt.Println("· no OPENROUTER_API_KEY — scripted mock demo (set the key for a real model)")
+		leadP = llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
+			{ToolCalls: []core.ToolCall{{
+				Name: "delegate",
+				Arguments: json.RawMessage("{\"member\":\"researcher\",\"task\":\"Research Go concurrency and report your findings.\"}"),
+			}}},
+			{Content: "Done. I delegated the research and synthesised the findings into a short summary.", FinishReason: "stop"},
+		}})
+		researchP = llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
+			{Content: "Findings: Go concurrency is built on goroutines (cheap, multiplexed threads) and channels for safe communication; 'go f()' starts a goroutine, 'select' coordinates many.", FinishReason: "stop"},
+		}})
+		writerP = llm.NewMock(llm.MockConfig{})
+	}
 
-	leader := agent.New("lead", lead)
+	leader := agent.New("lead", leadP)
 	leader.Instructions = "You coordinate the team and delegate tasks."
 	leader.Tools = core.BuiltinTools
 
-	researcherAgent := agent.New("researcher", researcher)
+	researcherAgent := agent.New("researcher", researchP)
 	researcherAgent.Description = "Finds facts and figures"
 	researcherAgent.Instructions = "You research topics and report findings."
 
-	writerAgent := agent.New("writer", writer)
+	writerAgent := agent.New("writer", writerP)
 	writerAgent.Description = "Turns notes into polished text"
 	writerAgent.Instructions = "You write clear, concise prose."
 
