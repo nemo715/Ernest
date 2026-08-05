@@ -3,6 +3,10 @@
 ## Layer map
 
 ```
+agent/ core/ llm/ team/ workflow/ server/ storage/   public API: thin forwarding
+   │      packages aliasing the internal types (module
+   │      github.com/nemo715/Ernest — importable by any project)
+   │
 cmd/ernest                 CLI: init, new, run, playground, doctor, eval, mcp-serve
    │
 internal/config            ernest.json → Runtime{Agents, Store, MCP clients}
@@ -30,6 +34,13 @@ internal/server            HTTP: SSE /api/chat, WS /ws/chat, sessions, approvals
 web/                       Next.js playground (WS transport, SSE fallback)
 python/ernest              Sync + async SDK mirroring the HTTP API
 ```
+
+The public packages at the module root (`agent`, `core`, `llm`, `team`,
+`workflow`, `server`, `storage`) are one-file forwarding packages that alias
+(`type X = internal.X`) the implementation types. Go's `internal/` rule
+forbids importing `ernest/internal/*` from outside the module, so the
+forwarding packages are what `ernest init` / `ernest new` scaffolds use —
+making scaffolded projects compilable anywhere.
 
 ## The wire format is the contract
 

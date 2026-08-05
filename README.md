@@ -87,10 +87,16 @@ Then run — or open the playground:
 ### 3. Build a team
 
 ```bash
-./ernest.exe new team examples/desk    # scaffold: ernest.json + main.go
+./ernest.exe new team examples/desk    # scaffold: ernest.json + main.go + go.mod
 cd examples/desk
+go mod tidy
 go run .                               # live delegation transcript on the terminal
 ```
+
+The scaffolded project is its own Go module and imports ernest from the
+published module path, so it compiles **anywhere** — no need to be inside
+this repo. The bundled scripted mock providers show the leader delegating
+and streaming the result, offline and without an API key.
 
 ## Python SDK
 
@@ -136,10 +142,13 @@ RAG pipelines.
 
 ## Status & honest limitations
 
-- Go examples import `ernest/internal/*`, which only compiles **inside this
-  repository**. External Go projects should use the config-only flows
-  (`ernest.json` + `ernest run` / `playground`) until a versioned public module
-  path is published.
+- Public Go API: `agent`, `core`, `llm`, `team`, `workflow`, `server`,
+  `storage` (module `github.com/nemo715/Ernest`, tagged `v0.1.1`).
+  `ernest init` / `ernest new <agent|team|workflow|server>` scaffold
+  standalone compilable projects.
+- `examples/`, `bench/` and `eval-demo/` import `ernest/internal/*` and
+  compile inside this repository only — the internal packages are not
+  importable from outside (Go's `internal/` rule).
 - Guardrails (token/cost caps, deny-lists, redaction) are set **in Go code**
   today; they are not yet `ernest.json` fields.
 - Config store types: `memory` (default) and `sqlite`. A PostgreSQL backend

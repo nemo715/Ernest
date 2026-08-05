@@ -30,6 +30,9 @@ web/node_modules/
 web/.next/
 web/out/
 web/.env*
+web/tsconfig.tsbuildinfo
+web/e2e-*.png
+web/*.tsbuildinfo
 
 # Scratch
 _demo/

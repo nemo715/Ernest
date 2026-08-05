@@ -46,15 +46,16 @@ perfect for tests, demos, and CI.
 
 | Command | Creates |
 |---|---|
-| `ernest new agent [dir]` | Single agent: `ernest.json` + `main.go` |
+| `ernest new agent [dir]` | Single agent: `ernest.json` + `main.go` + `go.mod` |
 | `ernest new team [dir]` | Leader + members with delegation (`team.New` in Go) |
 | `ernest new workflow [dir]` | Sequential workflow skeleton |
 | `ernest new server [dir]` | HTTP server wiring (SSE + WS + static UI) |
 
-> **Note**: the Go `main.go` files import `ernest/internal/*`, so they compile
-> inside this repository only. Standalone Go usage needs a versioned public
-> module path (planned). The **config-only** flows below (`ernest run`,
-> `ernest playground`) work from any directory.
+> **Note**: every scaffold is its own Go module (`go.mod`) that requires
+> `github.com/nemo715/Ernest` from the public module path, so it compiles
+> **anywhere** — no need to be inside the ernest repo. First run needs one
+> `go mod tidy` to fetch the module; the bundled mock providers need no API
+> key.
 
 ## 3. Configure a real model
 
@@ -166,6 +167,7 @@ gives you the wiring:
 ```bash
 ernest.exe new team examples/desk
 cd examples/desk
+go mod tidy   # first run only: fetches github.com/nemo715/Ernest
 go run .
 ```
 
@@ -190,8 +192,11 @@ for ev := range desk.Stream(ctx, team.TeamOptions{
 }
 ```
 
-The leader calls members through the `a2a_call` tool; delegation streams live
-as `delegate.start`/`delegate.end` events.
+The leader calls members through the `delegate` tool; delegation streams live
+as `delegate.start`/`delegate.end` events. The scaffold's scripted mock
+providers demonstrate this offline — the leader's scripted turn calls
+`delegate`, the member answers, and the stream prints both events. Swap
+`llm.NewMock` for a real provider and the model decides delegation itself.
 
 ## 6. Tools
 
