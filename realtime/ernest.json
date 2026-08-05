@@ -1,0 +1,16 @@
+{
+  "agents": [
+    {
+      "name": "assistant",
+      "description": "Real assistant on OpenRouter (OpenAI-compatible endpoint)",
+      "provider": "compatible",
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "instructions": "You are a helpful assistant. Use tools when they help.",
+      "tools": ["calculator", "http_fetch", "now"],
+      "memory": true
+    }
+  ],
+  "store": { "type": "sqlite", "dsn": "ernest.db" }
+}

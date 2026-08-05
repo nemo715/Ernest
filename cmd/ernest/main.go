@@ -1,0 +1,895 @@
+// Command ernest is the ernest CLI: scaffold projects (init), run agents
+// (run), boot the playground (playground) and diagnose environments
+// (doctor).
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+
+	"ernest/internal/agent"
+	"ernest/internal/config"
+	"ernest/internal/core"
+	"ernest/internal/eval"
+	"ernest/internal/mcp"
+	"ernest/internal/server"
+	"ernest/internal/storage"
+)
+
+const version = "0.1.0"
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "ernest:", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		usage()
+		return nil
+	}
+	switch args[0] {
+	case "init":
+		return cmdInit(args[1:])
+	case "new":
+		return cmdNew(args[1:])
+	case "run":
+		return cmdRun(args[1:])
+	case "playground":
+		return cmdPlayground(args[1:])
+	case "doctor":
+		return cmdDoctor(args[1:])
+	case "eval":
+		return cmdEval(args[1:])
+	case "mcp-serve":
+		return cmdMCPServe(args[1:])
+	case "version", "--version", "-v":
+		fmt.Println("ernest " + version)
+		return nil
+	case "help", "--help", "-h", "":
+		usage()
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q (init|new|run|eval|mcp-serve|playground|doctor)", args[0])
+	}
+}
+
+func usage() {
+	fmt.Print(`ernest — the fastest multi-agent framework
+
+Usage:
+  ernest init [dir]          scaffold an agent project (ernest.json, .env.example, main.go)
+  ernest new <template> [dir]  scaffold a project from a template (agent|team|workflow|server)
+  ernest run [flags]         run an agent from ernest.json
+  ernest eval [flags]        run scenario evals against an agent
+  ernest mcp-serve [flags]   expose agents as MCP tools over stdio
+  ernest playground [flags]  boot the playground server (web UI backend)
+  ernest doctor [flags]      diagnose the environment and configuration
+  ernest version             print the version
+  ernest help                show this help
+
+Run "ernest <command> -h" for command flags.
+`)
+}
+
+// ---------------------------------------------------------------------------
+// init
+// ---------------------------------------------------------------------------
+
+const scaffoldConfig = `{
+  "agents": [
+    {
+      "name": "assistant",
+      "description": "General assistant",
+      "provider": "mock",
+      "model": "mock-1",
+      "instructions": "You are a helpful assistant.",
+      "tools": ["calculator", "http_fetch", "now"],
+      "memory": true
+    }
+  ],
+  "store": { "type": "sqlite", "dsn": "ernest.db" }
+}
+`
+
+const scaffoldEnv = `# Copy to .env and fill in the providers you use.
+# ernest reads keys from these variables at runtime.
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+GEMINI_API_KEY=
+GROQ_API_KEY=
+`
+
+const scaffoldMain = `package main
+
+import (
+	"context"
+	"fmt"
+
+	"ernest/internal/agent"
+	"ernest/internal/core"
+	"ernest/internal/llm"
+)
+
+// A minimal programmatic agent. Swap the mock provider for a real one:
+//
+//	p := llm.OpenAI(os.Getenv("OPENAI_API_KEY"), "gpt-4o-mini")
+func main() {
+	p := llm.NewMock(llm.MockConfig{})
+	a := agent.New("assistant", p)
+	a.Instructions = "You are a helpful assistant."
+	a.Tools = core.BuiltinTools
+	res, err := a.Chat(context.Background(), "Say hello")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(res.Output)
+}
+`
+
+func cmdInit(args []string) error {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println("Usage: ernest init [dir]")
+		fmt.Println("Scaffolds ernest.json, .env.example and main.go in dir (default .).")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	dir := "."
+	if fs.NArg() > 0 {
+		dir = fs.Arg(0)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	files := map[string]string{
+		"ernest.json":   scaffoldConfig,
+		".env.example":  scaffoldEnv,
+		"main.go":       scaffoldMain,
+	}
+	for name, content := range files {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			fmt.Printf("skip %s (already exists)\n", name)
+			continue
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("created %s\n", path)
+	}
+	fmt.Println("\nNext: edit ernest.json, then run `ernest run` or `ernest playground`.")
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// new (templates)
+// ---------------------------------------------------------------------------
+
+// newTemplates are the `ernest new <template>` scaffolds. Every template
+// writes a valid ernest.json (config.Validate), a compiling main.go and a
+// .env.example; providers default to mock so projects run without keys.
+var newTemplates = map[string]struct {
+	summary string
+	files   map[string]string
+}{
+	"agent": {
+		summary: "single agent with tools + memory",
+		files: map[string]string{
+			"ernest.json": `{
+  "agents": [
+    {
+      "name": "assistant",
+      "description": "General assistant with calculator, fetch and time tools",
+      "provider": "mock",
+      "model": "mock-1",
+      "instructions": "You are a helpful assistant. Use tools when they help.",
+      "tools": ["calculator", "http_fetch", "now"],
+      "memory": true
+    }
+  ],
+  "store": { "type": "sqlite", "dsn": "ernest.db" }
+}
+`,
+			"main.go": `package main
+
+import (
+	"context"
+	"fmt"
+
+	"ernest/internal/agent"
+	"ernest/internal/core"
+	"ernest/internal/llm"
+)
+
+// A minimal programmatic agent. Swap the mock provider for a real one:
+//
+//	p := llm.OpenAI(os.Getenv("OPENAI_API_KEY"), "gpt-4o-mini")
+func main() {
+	p := llm.NewMock(llm.MockConfig{Stream: true})
+	a := agent.New("assistant", p)
+	a.Instructions = "You are a helpful assistant."
+	a.Tools = core.BuiltinTools
+
+	// Stream the run event by event.
+	ch, err := a.Stream(context.Background(), "Say hello", agent.RunOptions{})
+	if err != nil {
+		panic(err)
+	}
+	for ev := range ch {
+		if ev.Type == core.EventMessageDelta {
+			fmt.Print(ev.Delta)
+		}
+	}
+	fmt.Println()
+}
+`,
+		},
+	},
+	"team": {
+		summary: "leader agent delegating to specialist members",
+		files: map[string]string{
+			"ernest.json": `{
+  "agents": [
+    {
+      "name": "lead",
+      "description": "Team leader that delegates to specialists",
+      "provider": "mock",
+      "model": "mock-1",
+      "instructions": "You coordinate the team and delegate tasks.",
+      "tools": ["calculator", "http_fetch", "now"],
+      "memory": true
+    },
+    {
+      "name": "researcher",
+      "description": "Finds facts and figures",
+      "provider": "mock",
+      "model": "mock-1",
+      "instructions": "You research topics and report findings.",
+      "tools": ["http_fetch", "now"]
+    },
+    {
+      "name": "writer",
+      "description": "Turns notes into polished text",
+      "provider": "mock",
+      "model": "mock-1",
+      "instructions": "You write clear, concise prose.",
+      "tools": []
+    }
+  ],
+  "store": { "type": "sqlite", "dsn": "ernest.db" }
+}
+`,
+			"main.go": `package main
+
+import (
+	"context"
+	"fmt"
+
+	"ernest/internal/agent"
+	"ernest/internal/core"
+	"ernest/internal/llm"
+	"ernest/internal/team"
+)
+
+// A multi-agent team: the leader decides when to delegate, using the
+// delegate tool that team.New injects automatically.
+func main() {
+	p := llm.NewMock(llm.MockConfig{})
+
+	leader := agent.New("lead", p)
+	leader.Instructions = "You coordinate the team and delegate tasks."
+	leader.Tools = core.BuiltinTools
+
+	researcher := agent.New("researcher", p)
+	researcher.Description = "Finds facts and figures"
+	researcher.Instructions = "You research topics and report findings."
+	researcher.Tools = []*core.Tool{core.ToolsByName(core.BuiltinTools)["http_fetch"]}
+
+	writer := agent.New("writer", p)
+	writer.Description = "Turns notes into polished text"
+	writer.Instructions = "You write clear, concise prose."
+
+	t := team.New("editorial", leader, researcher, writer)
+	res, err := t.Chat(context.Background(), "Research Go concurrency and write a short summary.")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(res.Output)
+}
+`,
+		},
+	},
+	"workflow": {
+		summary: "explicit step DAG with guards, retries and agents",
+		files: map[string]string{
+			"ernest.json": `{
+  "agents": [
+    {
+      "name": "assistant",
+      "description": "Workflow worker agent",
+      "provider": "mock",
+      "model": "mock-1",
+      "instructions": "You are a precise worker.",
+      "tools": ["calculator", "http_fetch", "now"],
+      "memory": true
+    }
+  ],
+  "store": { "type": "sqlite", "dsn": "ernest.db" }
+}
+`,
+			"main.go": `package main
+
+import (
+	"context"
+	"fmt"
+
+	"ernest/internal/agent"
+	"ernest/internal/llm"
+	"ernest/internal/workflow"
+)
+
+// A step DAG: plan -> research (via the agent) -> write. Steps share
+// state; independent steps would run concurrently.
+func main() {
+	p := llm.NewMock(llm.MockConfig{})
+	a := agent.New("assistant", p)
+	a.Instructions = "You are a precise worker."
+
+	wf := workflow.New("pipeline")
+	wf.Agents = map[string]*agent.Agent{"assistant": a}
+	wf.Steps = []*workflow.Step{
+		{
+			Name: "plan",
+			Run: func(ctx *workflow.StepContext) error {
+				ctx.Log("planning %v", ctx.Input())
+				ctx.Set("plan", "research -> write")
+				return nil
+			},
+		},
+		{
+			Name:      "research",
+			DependsOn: []string{"plan"},
+			Run: func(ctx *workflow.StepContext) error {
+				res, err := ctx.Agent("assistant").Chat(ctx.Ctx, "Research: Go concurrency",
+					agent.RunOptions{SessionID: ctx.RunID + ":research"})
+				if err != nil {
+					return err
+				}
+				ctx.Set("notes", res.Output)
+				return nil
+			},
+		},
+		{
+			Name:      "write",
+			DependsOn: []string{"research"},
+			Run: func(ctx *workflow.StepContext) error {
+				fmt.Println("notes:", ctx.Get("notes"))
+				return nil
+			},
+		},
+	}
+
+	res, err := wf.Run(context.Background(), "a two-paragraph intro to Go")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(res.Output)
+}
+`,
+		},
+	},
+	"server": {
+		summary: "HTTP API + playground backend (SSE, WS, HITL)",
+		files: map[string]string{
+			"ernest.json": `{
+  "agents": [
+    {
+      "name": "assistant",
+      "description": "General assistant served over HTTP",
+      "provider": "mock",
+      "model": "mock-1",
+      "instructions": "You are a helpful assistant. Use tools when they help.",
+      "tools": ["calculator", "http_fetch", "now"],
+      "memory": true
+    }
+  ],
+  "store": { "type": "sqlite", "dsn": "ernest.db" }
+}
+`,
+			"main.go": `package main
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"ernest/internal/agent"
+	"ernest/internal/core"
+	"ernest/internal/llm"
+	"ernest/internal/server"
+	"ernest/internal/storage"
+)
+
+// An embedded HTTP server exposing the full API: /api/chat (SSE),
+// /ws/chat (realtime transport), approvals, sessions, runs/trace.
+func main() {
+	p := llm.NewMock(llm.MockConfig{})
+	a := agent.New("assistant", p)
+	a.Instructions = "You are a helpful assistant."
+	a.Tools = core.BuiltinTools
+	a.Store = storage.NewInMemoryStore()
+
+	srv, err := server.New(server.Options{Agents: []*agent.Agent{a}, Store: a.Store})
+	if err != nil {
+		panic(err)
+	}
+	defer srv.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:9090")
+	if err != nil {
+		panic(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+
+	fmt.Println("ernest server: http://" + ln.Addr().String())
+	httpServer := &http.Server{Handler: srv.Handler()}
+	if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+		panic(err)
+	}
+}
+`,
+		},
+	},
+}
+
+func cmdNew(args []string) error {
+	fs := flag.NewFlagSet("new", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println("Usage: ernest new <template> [dir]")
+		fmt.Println("Scaffolds a project from a template into dir (default .).")
+		fmt.Println("Templates:")
+		for name, t := range newTemplates {
+			fmt.Printf("  %-9s %s\n", name, t.summary)
+		}
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		fs.Usage()
+		return nil
+	}
+	tpl, ok := newTemplates[fs.Arg(0)]
+	if !ok {
+		names := make([]string, 0, len(newTemplates))
+		for n := range newTemplates {
+			names = append(names, n)
+		}
+		return fmt.Errorf("unknown template %q (available: %s)", fs.Arg(0), strings.Join(names, ", "))
+	}
+	dir := "."
+	if fs.NArg() > 1 {
+		dir = fs.Arg(1)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for name, content := range tpl.files {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			fmt.Printf("skip %s (already exists)\n", path)
+			continue
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("created %s\n", path)
+	}
+	fmt.Println("\nNext: cd " + dir + " && ernest playground (mock provider needs no keys).")
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// run
+// ---------------------------------------------------------------------------
+
+func cmdRun(args []string) error {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	cfgPath := fs.String("config", config.DefaultFile, "path to ernest.json")
+	agentName := fs.String("agent", "", "agent name (default: first agent)")
+	input := fs.String("input", "", "one-shot input; without it ernest reads lines from stdin")
+	session := fs.String("session", "", "session id for memory continuity")
+	asJSON := fs.Bool("json", false, "print the full run result as JSON")
+	noMemory := fs.Bool("no-memory", false, "skip session persistence")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	rt, err := cfg.Build(nil)
+	if err != nil {
+		return err
+	}
+	defer rt.Close()
+
+	ag := pickAgent(rt.Agents, *agentName)
+	if ag == nil {
+		return fmt.Errorf("agent %q not found (have: %s)", *agentName, agentNames(rt.Agents))
+	}
+
+	ctx := context.Background()
+	if *input != "" {
+		res, err := runOnce(ctx, ag, *input, *session, *noMemory)
+		if err != nil {
+			return err
+		}
+		return printResult(res, *asJSON)
+	}
+	// Interactive: read lines from stdin, stream output per line.
+	sc := bufio.NewScanner(os.Stdin)
+	fmt.Printf("ernest> %s (ctrl-c to quit)\n", ag.Name)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		res, err := runOnce(ctx, ag, line, *session, *noMemory)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			continue
+		}
+		if res.Status == "awaiting_approval" {
+			for _, ap := range res.Approvals {
+				fmt.Printf("[approval needed] %s: %s (resume via UI or SDK)\n", ap.Action, ap.Summary)
+			}
+		}
+		fmt.Println(res.Output)
+	}
+	return sc.Err()
+}
+
+func runOnce(ctx context.Context, ag *agent.Agent, input, session string, noMemory bool) (*core.RunResult, error) {
+	opts := agent.RunOptions{SessionID: session, SkipMemory: noMemory}
+	return ag.Chat(ctx, input, opts)
+}
+
+func printResult(res *core.RunResult, asJSON bool) error {
+	if asJSON {
+		data, err := json.MarshalIndent(res, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+	if res.Status != core.RunStatusCompleted {
+		fmt.Printf("[%s] ", res.Status)
+	}
+	fmt.Println(res.Output)
+	if res.Error != "" {
+		return fmt.Errorf("%s", res.Error)
+	}
+	return nil
+}
+
+func pickAgent(agents []*agent.Agent, name string) *agent.Agent {
+	if name == "" && len(agents) > 0 {
+		return agents[0]
+	}
+	for _, a := range agents {
+		if a.Name == name {
+			return a
+		}
+	}
+	return nil
+}
+
+func agentNames(agents []*agent.Agent) string {
+	names := make([]string, 0, len(agents))
+	for _, a := range agents {
+		names = append(names, a.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+// ---------------------------------------------------------------------------
+// eval
+// ---------------------------------------------------------------------------
+
+func cmdEval(args []string) error {
+	fs := flag.NewFlagSet("eval", flag.ExitOnError)
+	cfgPath := fs.String("config", config.DefaultFile, "path to ernest.json")
+	agentName := fs.String("agent", "", "agent name (default: first agent)")
+	scenarios := fs.String("scenarios", "scenarios", "scenario file or directory")
+	asJSON := fs.Bool("json", false, "print results as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	rt, err := cfg.Build(nil)
+	if err != nil {
+		return err
+	}
+	defer rt.Close()
+
+	ag := pickAgent(rt.Agents, *agentName)
+	if ag == nil {
+		return fmt.Errorf("agent %q not found (have: %s)", *agentName, agentNames(rt.Agents))
+	}
+
+	scs, err := eval.LoadScenarios(*scenarios)
+	if err != nil {
+		return fmt.Errorf("scenarios: %w", err)
+	}
+	if len(scs) == 0 {
+		return fmt.Errorf("no scenarios found in %s", *scenarios)
+	}
+
+	results, err := eval.RunAll(context.Background(), ag, scs)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		data, err := json.MarshalIndent(results, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+	} else {
+		passed := 0
+		fmt.Printf("ernest eval — agent %s, %d scenarios\n", ag.Name, len(results))
+		for _, r := range results {
+			mark := "PASS"
+			if !r.Pass {
+				mark = "FAIL"
+			}
+			fmt.Printf("  %-4s %-30s %5dms  %s\n", mark, r.Name, r.DurationMS, r.Status)
+			if r.Pass {
+				passed++
+			} else {
+				for _, f := range r.Failures {
+					fmt.Printf("        - %s\n", f)
+				}
+			}
+		}
+		fmt.Printf("%d/%d scenarios passed\n", passed, len(results))
+		if passed != len(results) {
+			return fmt.Errorf("%d scenario(s) failed", len(results)-passed)
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// mcp-serve
+// ---------------------------------------------------------------------------
+
+func cmdMCPServe(args []string) error {
+	fs := flag.NewFlagSet("mcp-serve", flag.ExitOnError)
+	cfgPath := fs.String("config", config.DefaultFile, "path to ernest.json")
+	name := fs.String("name", "ernest", "server name reported to clients")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	rt, err := cfg.Build(nil)
+	if err != nil {
+		return err
+	}
+	defer rt.Close()
+
+	srv := mcp.NewServer(rt.Agents, mcp.ServerOptions{Name: *name, Version: version})
+	fmt.Fprintln(os.Stderr, "ernest mcp-serve: agents as tools:", agentNames(rt.Agents))
+	return srv.ServeStdio(context.Background(), os.Stdin, os.Stdout)
+}
+
+// ---------------------------------------------------------------------------
+// playground
+// ---------------------------------------------------------------------------
+
+func cmdPlayground(args []string) error {
+	fs := flag.NewFlagSet("playground", flag.ExitOnError)
+	cfgPath := fs.String("config", config.DefaultFile, "path to ernest.json")
+	host := fs.String("host", "127.0.0.1", "listen host")
+	port := fs.String("port", "9090", "listen port")
+	static := fs.String("static", "", "built UI directory (optional)")
+	demo := fs.Bool("demo", false, "boot a self-contained demo (mock agent, no config needed)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	var rt *config.Runtime
+	if *demo {
+		// Self-contained demo: mock agent + in-memory store, no keys.
+		temp := 0.7
+		demoCfg := &config.Config{
+			Agents: []config.AgentConfig{
+				{
+					Name:         "demo",
+					Description:  "A self-contained demo agent (mock provider, no API keys)",
+					Provider:     "mock",
+					Model:        "mock-1",
+					Instructions: "You are the ernest demo agent. Be brief, friendly and use tools when they help.",
+					Tools:        []string{"calculator", "http_fetch", "now"},
+					Memory:       true,
+					Temperature:  &temp,
+				},
+			},
+			Store: config.StoreConfig{Type: "memory"},
+		}
+		var err error
+		rt, err = demoCfg.Build(nil)
+		if err != nil {
+			return err
+		}
+	} else {
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			return err
+		}
+		rt, err = cfg.Build(nil)
+		if err != nil {
+			return err
+		}
+	}
+	defer rt.Close()
+
+	srv, err := server.New(server.Options{Agents: rt.Agents, Store: rt.Store, Static: *static})
+	if err != nil {
+		return err
+	}
+	defer srv.Close()
+
+	addr := net.JoinHostPort(*host, *port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+
+	fmt.Printf("ernest playground: http://%s  (agents: %s)\n", ln.Addr(), agentNames(rt.Agents))
+	fmt.Println("press ctrl-c to stop")
+	server := &http.Server{Handler: srv.Handler()}
+	err = server.Serve(ln)
+	if err == http.ErrServerClosed || ctx.Err() != nil {
+		return nil
+	}
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// doctor
+// ---------------------------------------------------------------------------
+
+func cmdDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	cfgPath := fs.String("config", config.DefaultFile, "path to ernest.json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ok := true
+	check := func(name, status string, err error) {
+		if err != nil {
+			status = "FAIL " + err.Error()
+			ok = false
+		}
+		fmt.Printf("  %-14s %s\n", name, status)
+	}
+
+	fmt.Println("ernest doctor")
+	fmt.Printf("  %-14s %s %s/%s\n", "runtime", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		check("config", "", err)
+	} else {
+		check("config", fmt.Sprintf("OK %s (%d agents, %d mcp servers)", *cfgPath, len(cfg.Agents), len(cfg.MCPServers)), nil)
+		for _, ac := range cfg.Agents {
+			if strings.EqualFold(ac.Provider, "mock") {
+				check("agent "+ac.Name, "OK mock provider (no key needed)", nil)
+				continue
+			}
+			if strings.EqualFold(ac.Provider, "ollama") {
+				check("agent "+ac.Name, "OK ollama (no key needed)", nil)
+				continue
+			}
+			keyEnv := ac.APIKeyEnv
+			if keyEnv == "" {
+				keyEnv = defaultKeyEnvForDoctor(ac.Provider)
+			}
+			if keyEnv == "" || os.Getenv(keyEnv) == "" {
+				check("agent "+ac.Name, "WARN "+ac.Provider+": "+keyEnv+" not set", fmt.Errorf("missing %s", keyEnv))
+				continue
+			}
+			check("agent "+ac.Name, "OK "+ac.Provider+" ("+keyEnv+" set)", nil)
+		}
+		for _, mc := range cfg.MCPServers {
+			if mc.Transport == "http" {
+				check("mcp "+mc.Name, "OK http "+mc.URL, nil)
+				continue
+			}
+			if _, err := exec.LookPath(mc.Command); err != nil {
+				check("mcp "+mc.Name, "", fmt.Errorf("command %q not found on PATH", mc.Command))
+				continue
+			}
+			check("mcp "+mc.Name, "OK command "+mc.Command, nil)
+		}
+		// The store must open (sqlite file writable).
+		if strings.EqualFold(cfg.Store.Type, "sqlite") {
+			dsn := cfg.Store.DSN
+			if dsn == "" {
+				dsn = "ernest.db"
+			}
+			st, err := storage.NewSQLiteStore(dsn)
+			if err != nil {
+				check("store", "", err)
+			} else {
+				check("store", "OK sqlite "+dsn, nil)
+				_ = st.Close()
+			}
+		}
+	}
+
+	if !ok {
+		return fmt.Errorf("doctor found issues")
+	}
+	fmt.Println("all checks passed")
+	return nil
+}
+
+func defaultKeyEnvForDoctor(provider string) string {
+	switch strings.ToLower(provider) {
+	case "openai":
+		return "OPENAI_API_KEY"
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
+	case "gemini":
+		return "GEMINI_API_KEY"
+	case "groq":
+		return "GROQ_API_KEY"
+	}
+	return ""
+}

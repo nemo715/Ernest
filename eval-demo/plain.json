@@ -1,0 +1,1 @@
+{"name":"plain","input":"hello","expect":{"outputContains":["the answer is 42"]}}

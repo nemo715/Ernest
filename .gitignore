@@ -1,0 +1,38 @@
+# Binaries and builds
+*.exe
+*.exe~
+*.test
+*.out
+
+# Go
+bench/venv/
+_dbg/
+
+# Data / state
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Node / web
+node_modules/
+web/node_modules/
+web/.next/
+web/out/
+web/.env*
+
+# Scratch
+_demo/
+.benchmarks/
+test-out.txt
+chat.json

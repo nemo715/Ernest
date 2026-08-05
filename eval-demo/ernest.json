@@ -1,0 +1,1 @@
+{"agents":[{"name":"assistant","description":"General assistant","provider":"mock","model":"mock-1","instructions":"You are a helpful assistant.","tools":["calculator","http_fetch","now","browser"],"memory":true}],"store":{"type":"sqlite","dsn":"ernest.db"}}

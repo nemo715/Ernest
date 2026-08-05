@@ -1,0 +1,37 @@
+{
+  "agents": [
+    {
+      "name": "lead",
+      "description": "Team leader that delegates to specialists",
+      "provider": "compatible",
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "instructions": "You coordinate the team and delegate tasks.",
+      "tools": ["now"],
+      "memory": true,
+      "maxIterations": 8
+    },
+    {
+      "name": "researcher",
+      "description": "Finds facts and figures",
+      "provider": "compatible",
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "instructions": "You research topics and report findings. Solve any arithmetic exactly with the calculator tool.",
+      "tools": ["http_fetch", "calculator", "now"]
+    },
+    {
+      "name": "writer",
+      "description": "Turns notes into polished text",
+      "provider": "compatible",
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "instructions": "You write clear, concise prose.",
+      "tools": []
+    }
+  ],
+  "store": { "type": "sqlite", "dsn": "ernest.db" }
+}
