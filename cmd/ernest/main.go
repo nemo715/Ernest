@@ -28,7 +28,7 @@ import (
 	"github.com/nemo715/Ernest/internal/storage"
 )
 
-const version = "0.1.0"
+const version = "0.1.1"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -120,9 +120,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/nemo715/Ernest/internal/agent"
-	"github.com/nemo715/Ernest/internal/core"
-	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/agent"
+	"github.com/nemo715/Ernest/core"
+	"github.com/nemo715/Ernest/llm"
 )
 
 // A minimal programmatic agent. Swap the mock provider for a real one:
@@ -144,7 +144,7 @@ func main() {
 // scaffoldMod is the go.mod written by init and every `ernest new`
 // template: the project is its own module and imports ernest from the
 // published module path, so scaffolds compile outside the ernest repo.
-const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.0\n"
+const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.1\n"
 
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
@@ -179,7 +179,7 @@ func cmdInit(args []string) error {
 		}
 		fmt.Printf("created %s\n", path)
 	}
-	fmt.Println("\nNext: edit ernest.json, then run `ernest run` or `ernest playground`.")
+	fmt.Println("\nNext: edit ernest.json, then `go mod tidy && go run .` or `ernest run` / `ernest playground`.")
 	return nil
 }
 
@@ -219,9 +219,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/nemo715/Ernest/internal/agent"
-	"github.com/nemo715/Ernest/internal/core"
-	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/agent"
+	"github.com/nemo715/Ernest/core"
+	"github.com/nemo715/Ernest/llm"
 )
 
 // A minimal programmatic agent. Swap the mock provider for a real one:
@@ -290,10 +290,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/nemo715/Ernest/internal/agent"
-	"github.com/nemo715/Ernest/internal/core"
-	"github.com/nemo715/Ernest/internal/llm"
-	"github.com/nemo715/Ernest/internal/team"
+	"github.com/nemo715/Ernest/agent"
+	"github.com/nemo715/Ernest/core"
+	"github.com/nemo715/Ernest/llm"
+	"github.com/nemo715/Ernest/team"
 )
 
 // A multi-agent team: the leader decides when to delegate, using the
@@ -375,9 +375,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/nemo715/Ernest/internal/agent"
-	"github.com/nemo715/Ernest/internal/llm"
-	"github.com/nemo715/Ernest/internal/workflow"
+	"github.com/nemo715/Ernest/agent"
+	"github.com/nemo715/Ernest/llm"
+	"github.com/nemo715/Ernest/workflow"
 )
 
 // A step DAG: plan -> research (via the agent) -> write. Steps share
@@ -460,11 +460,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/nemo715/Ernest/internal/agent"
-	"github.com/nemo715/Ernest/internal/core"
-	"github.com/nemo715/Ernest/internal/llm"
-	"github.com/nemo715/Ernest/internal/server"
-	"github.com/nemo715/Ernest/internal/storage"
+	"github.com/nemo715/Ernest/agent"
+	"github.com/nemo715/Ernest/core"
+	"github.com/nemo715/Ernest/llm"
+	"github.com/nemo715/Ernest/server"
+	"github.com/nemo715/Ernest/storage"
 )
 
 // An embedded HTTP server exposing the full API: /api/chat (SSE),
@@ -547,7 +547,7 @@ func cmdNew(args []string) error {
 		}
 		fmt.Printf("created %s\n", path)
 	}
-	fmt.Println("\nNext: cd " + dir + " && ernest playground (mock provider needs no keys).")
+	fmt.Println("\nNext: cd " + dir + " && go mod tidy && go run .  (or ernest playground; mock provider needs no keys)")
 	return nil
 }
 
