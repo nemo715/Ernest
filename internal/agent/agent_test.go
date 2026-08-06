@@ -333,6 +333,87 @@ func TestStreamResumeWithoutStoreFailsFast(t *testing.T) {
 // Memory + knowledge
 // ---------------------------------------------------------------------------
 
+func TestSanitizeHistoryDropsDanglingToolCalls(t *testing.T) {
+	call := core.ToolCall{ID: "c1", Name: "calculator", Arguments: []byte(`{"expression":"1"}`)}
+	call2 := core.ToolCall{ID: "c2", Name: "calculator", Arguments: []byte(`{"expression":"2"}`)}
+
+	// Dangling message NOT at the tail: a new run appended its user
+	// message after the aborted tool_calls turn.
+	mid := []core.Message{
+		{Role: core.RoleUser, Content: "go"},
+		{Role: core.RoleAssistant, ToolCalls: []core.ToolCall{call}},
+		{Role: core.RoleUser, Content: "again"},
+	}
+	if got := sanitizeHistory(mid); len(got) != 2 || got[1].Role != core.RoleUser {
+		t.Fatalf("mid-history dangling message not dropped: %+v", got)
+	}
+
+	// Partially answered: c1 answered, c2 dangling -> drop assistant
+	// message AND the orphaned c1 tool response.
+	partial := []core.Message{
+		{Role: core.RoleUser, Content: "go"},
+		{Role: core.RoleAssistant, ToolCalls: []core.ToolCall{call, call2}},
+		{Role: core.RoleTool, Content: "1", ToolCallID: "c1"},
+		{Role: core.RoleUser, Content: "again"},
+	}
+	got := sanitizeHistory(partial)
+	if len(got) != 2 || got[1].Role != core.RoleUser {
+		t.Fatalf("partial history not sanitized: %+v", got)
+	}
+
+	// Completed tool round-trip must be untouched.
+	ok := []core.Message{
+		{Role: core.RoleUser, Content: "go"},
+		{Role: core.RoleAssistant, ToolCalls: []core.ToolCall{call, call2}},
+		{Role: core.RoleTool, Content: "1", ToolCallID: "c1"},
+		{Role: core.RoleTool, Content: "2", ToolCallID: "c2"},
+	}
+	if got := sanitizeHistory(ok); len(got) != 4 {
+		t.Fatalf("complete history changed: %+v", got)
+	}
+	// Empty and single-message histories pass through.
+	if got := sanitizeHistory(nil); got != nil {
+		t.Fatalf("nil history changed: %+v", got)
+	}
+	if got := sanitizeHistory(ok[:1]); len(got) != 1 {
+		t.Fatalf("single message changed: %+v", got)
+	}
+}
+
+func TestCapToolResultsTruncatesOversizedHistory(t *testing.T) {
+	big := strings.Repeat("x", maxToolResultRunes*2) // > 64K runes
+	small := "ok"
+	history := []core.Message{
+		{Role: core.RoleUser, Content: "hello"},
+		{Role: core.RoleTool, Content: big, Name: "http_fetch", ToolCallID: "t1"},
+		{Role: core.RoleTool, Content: small, Name: "calculator", ToolCallID: "t2"},
+	}
+	got := capToolResults(history)
+	if len(got) != 3 {
+		t.Fatalf("message count changed: %d", len(got))
+	}
+	if got[1].Content == big {
+		t.Fatal("oversized tool result not truncated")
+	}
+	if len(got[1].Content) > maxToolResultRunes+64 {
+		t.Fatalf("truncated result still too large: %d runes", len([]rune(got[1].Content)))
+	}
+	if !strings.Contains(got[1].Content, "[truncated tool result]") {
+		t.Fatalf("missing truncation marker: %q...", got[1].Content[:80])
+	}
+	if got[2].Content != small {
+		t.Fatal("small tool result must pass through unchanged")
+	}
+	// Storage must be untouched: the input slice is not mutated.
+	if history[1].Content != big {
+		t.Fatal("input history mutated")
+	}
+	// All-small history returns the same slice.
+	if got := capToolResults(history[2:]); got[0].Content != small || len(got) != 1 {
+		t.Fatalf("small-only history changed: %+v", got)
+	}
+}
+
 func TestMemoryPersistence(t *testing.T) {
 	p := mockScripted(t, []llm.MockTurn{
 		{Content: "hello one", FinishReason: "stop"},

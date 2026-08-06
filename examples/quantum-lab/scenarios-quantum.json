@@ -1,0 +1,66 @@
+{
+  "scenarios": [
+    {
+      "name": "theory-grounding",
+      "input": "Fetch https://en.wikipedia.org/wiki/Bloch_sphere with http_fetch. Then state the standard relation between a qubit state |psi> = alpha|0> + beta|1> and the Bloch sphere angles theta and phi.",
+      "expect": {
+        "status": "completed",
+        "toolCalls": [{ "name": "http_fetch" }],
+        "outputContains": ["theta"]
+      }
+    },
+    {
+      "name": "theory-normalization",
+      "input": "For a pure qubit state, |alpha|^2 + |beta|^2 = 1. If |alpha|^2 = 0.25, use the calculator to compute |beta|^2 exactly and state it.",
+      "expect": {
+        "status": "completed",
+        "toolCalls": [{ "name": "calculator" }],
+        "outputContains": ["0.75"]
+      }
+    },
+    {
+      "name": "theory-born-rule",
+      "input": "Explain in one paragraph why |alpha|^2 + |beta|^2 = 1 for a qubit, and what each term means physically.",
+      "expect": { "status": "completed" },
+      "judge": {
+        "rubric": "The answer must explain that probabilities must sum to 1 (normalization / Born rule) and that |alpha|^2 and |beta|^2 are the probabilities of measuring 0 and 1.",
+        "minScore": 0.7
+      }
+    },
+    {
+      "name": "engineer-html-fence",
+      "input": "Write a complete, minimal single-file HTML page that draws a circle on a <canvas>. Put the full HTML inside a ```html fenced block and nothing else outside the fence.",
+      "expect": {
+        "status": "completed",
+        "outputContains": ["```html", "<canvas", "</html>"]
+      }
+    },
+    {
+      "name": "engineer-hadamard-math",
+      "input": "The Hadamard gate maps |0> to (|0>+|1>)/sqrt(2). Use the calculator to verify that (1/sqrt(2))^2 = 0.5 and state the two probabilities.",
+      "expect": {
+        "status": "completed",
+        "toolCalls": [{ "name": "calculator" }],
+        "outputContains": ["0.5"]
+      }
+    },
+    {
+      "name": "reviewer-catch-x",
+      "input": "A colleague implemented the X gate and claims that applying X to |0> leaves the state with P(0)=0.5. Use the calculator to check the claim (X|0> = |1> so P(1)=1). Is the colleague right?",
+      "expect": { "status": "completed", "toolCalls": [{ "name": "calculator" }] },
+      "judge": {
+        "rubric": "The answer must conclude the colleague is wrong and state that after X|0> the state is |1> with P(1)=1.",
+        "minScore": 0.7
+      }
+    },
+    {
+      "name": "reviewer-arrow-bug",
+      "input": "A Bloch sphere demo renders the initial |0> state with an arrow of zero length at the center of the sphere. Give a verdict: is the visualization correct?",
+      "expect": { "status": "completed" },
+      "judge": {
+        "rubric": "The answer must say the visualization is buggy: |0> is the north pole and the arrow must have full length pointing up.",
+        "minScore": 0.7
+      }
+    }
+  ]
+}

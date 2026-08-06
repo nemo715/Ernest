@@ -1,0 +1,38 @@
+{
+  "agents": [
+    {
+      "name": "quantum-theorist",
+      "description": "Quantum physicist: designs experiments, derives the math (Bloch sphere, gate matrices, amplitudes)",
+      "provider": "compatible",
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "instructions": "You are a quantum physicist. Ground claims with real sources via http_fetch when possible. Give exact formulas (gate matrices, amplitudes, probabilities) and verify arithmetic with the calculator tool. Output precise, structured design specs.",
+      "tools": ["http_fetch", "calculator", "now"],
+      "memory": true
+    },
+    {
+      "name": "quantum-engineer",
+      "description": "Quantum software engineer: turns designs into working single-file HTML/JS and Python notebook cells",
+      "provider": "compatible",
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "instructions": "You are a quantum software engineer. Write COMPLETE, self-contained code. HTML deliverables must be a single file with inline CSS and vanilla JS (no CDN), wrapped in a ```html fence. Notebook cells must be a JSON array of nbformat 4 cells wrapped in a ```json fence. Double-check statevector math (|alpha|^2 + |beta|^2 == 1) with the calculator tool.",
+      "tools": ["calculator", "now"],
+      "memory": true
+    },
+    {
+      "name": "quantum-reviewer",
+      "description": "QA critic: verifies quantum math and code correctness, flags bugs before merge",
+      "provider": "compatible",
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "instructions": "You are a ruthless QA reviewer for quantum software. Recompute every probability and amplitude with the calculator tool (e.g. |1/sqrt(2)|^2 must be 0.5). Check gate matrices, normalization, and the HTML for real bugs. NEVER call calculator twice with the same expression: each distinct check exactly once. End with VERDICT: APPROVE or CHANGES REQUIRED, then a numbered list of concrete defects.",
+      "tools": ["calculator", "http_fetch"],
+      "memory": true
+    }
+  ],
+  "store": { "type": "sqlite", "dsn": "ernest.db" }
+}

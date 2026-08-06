@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -117,11 +119,11 @@ func ToolsByName(tools []*Tool) map[string]*Tool {
 
 // HTTPFetchArgs is the argument shape of the HTTPFetch tool.
 type HTTPFetchArgs struct {
-	URL     string            `json:"url" jsonschema:"The absolute URL to fetch"`
-	Method  string            `json:"method,omitempty" jsonschema:"HTTP method (default GET), enum:GET,POST,PUT,DELETE,PATCH" enum:"GET,POST,PUT,DELETE,PATCH"`
-	Headers map[string]string `json:"headers,omitempty" jsonschema:"Optional request headers"`
-	Body    string            `json:"body,omitempty" jsonschema:"Request body for POST/PUT/PATCH"`
-	MaxBytes int              `json:"maxBytes,omitempty" jsonschema:"Cap on response size (default 1MB)"`
+	URL      string            `json:"url" jsonschema:"The absolute URL to fetch"`
+	Method   string            `json:"method,omitempty" jsonschema:"HTTP method (default GET), enum:GET,POST,PUT,DELETE,PATCH" enum:"GET,POST,PUT,DELETE,PATCH"`
+	Headers  map[string]string `json:"headers,omitempty" jsonschema:"Optional request headers"`
+	Body     string            `json:"body,omitempty" jsonschema:"Request body for POST/PUT/PATCH"`
+	MaxBytes int               `json:"maxBytes,omitempty" jsonschema:"Cap on returned size (default 32768; HTML is converted to plain text)"`
 }
 
 // HTTPFetchResult is the result of the HTTPFetch tool.
@@ -132,8 +134,11 @@ type HTTPFetchResult struct {
 }
 
 // HTTPFetch lets an agent call any HTTP endpoint (a web search / API
-// surrogate). Network is always scoped to the shared ToolContext client.
-var HTTPFetch = MustTool[HTTPFetchArgs]("http_fetch", "Fetch a URL over HTTP(S) and return the response body", func(ctx context.Context, tc *ToolContext, args HTTPFetchArgs) (any, error) {
+// surrogate). Results are LLM-safe: HTML pages are converted to readable
+// plain text and the body is capped at maxBytes (default 32768), so a
+// large page cannot blow the model context window. Network is always
+// scoped to the shared ToolContext client.
+var HTTPFetch = MustTool[HTTPFetchArgs]("http_fetch", "Fetch a URL over HTTP(S) and return the response body as plain text (HTML pages are auto-converted to readable text). maxBytes caps the returned size (default 32768).", func(ctx context.Context, tc *ToolContext, args HTTPFetchArgs) (any, error) {
 	method := strings.ToUpper(args.Method)
 	if method == "" {
 		method = "GET"
@@ -143,7 +148,7 @@ var HTTPFetch = MustTool[HTTPFetchArgs]("http_fetch", "Fetch a URL over HTTP(S) 
 	}
 	maxBytes := args.MaxBytes
 	if maxBytes <= 0 {
-		maxBytes = 1 << 20
+		maxBytes = 32 << 10
 	}
 	client := tc.HTTP
 	if client == nil {
@@ -161,18 +166,70 @@ var HTTPFetch = MustTool[HTTPFetchArgs]("http_fetch", "Fetch a URL over HTTP(S) 
 		return nil, NewError(KindTool, "http_fetch: "+err.Error(), err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)))
 	if err != nil {
 		return nil, NewError(KindTool, "http_fetch: read failed: "+err.Error(), err)
 	}
+	body := string(raw)
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		body = htmlToText(body)
+	}
+	body = truncateRunes(body, maxBytes)
 	h := make(map[string]string, len(resp.Header))
 	for k, vs := range resp.Header {
 		if len(vs) > 0 {
 			h[k] = vs[0]
 		}
 	}
-	return HTTPFetchResult{Status: resp.StatusCode, Headers: h, Body: string(body)}, nil
+	return HTTPFetchResult{Status: resp.StatusCode, Headers: h, Body: body}, nil
 })
+
+var (
+	htmlScriptRE = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`)
+	htmlStyleRE  = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	htmlBlockTagRE = regexp.MustCompile(`(?i)<(br\s*/?|/p|/div|/li|/tr|/h[1-6]|/table|/ul|/ol|/blockquote)\s*>`)
+	htmlAnyTagRE   = regexp.MustCompile(`<[^>]+>`)
+)
+
+// htmlToText converts an HTML document into readable plain text for LLM
+// consumption: scripts and styles are dropped, block tags become newlines,
+// entities are decoded and whitespace is collapsed. Non-HTML payloads are
+// returned untouched.
+func htmlToText(raw string) string {
+	if !strings.Contains(raw, "<html") && !strings.Contains(raw, "<body") {
+		return raw
+	}
+	s := htmlScriptRE.ReplaceAllString(raw, "")
+	s = htmlStyleRE.ReplaceAllString(s, "")
+	s = htmlBlockTagRE.ReplaceAllString(s, "\n")
+	s = htmlAnyTagRE.ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+	var b strings.Builder
+	for _, ln := range strings.Split(s, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(ln)
+	}
+	return b.String()
+}
+
+// truncateRunes caps a string at max runes without splitting a multi-byte
+// UTF-8 character (a byte cut would corrupt JSON round-trips).
+func truncateRunes(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max])
+	}
+	return s
+}
 
 // CalculatorArgs is the argument shape of the Calculator tool.
 type CalculatorArgs struct {

@@ -563,6 +563,8 @@ func (r *runner) buildRequest(ctx context.Context) (llm.ChatRequest, error) {
 	if r.mem != nil && r.mem.Strategy != nil {
 		history = r.mem.Strategy.Trim(history)
 	}
+	history = sanitizeHistory(history)
+	history = capToolResults(history)
 	messages = append(messages, history...)
 	req := llm.ChatRequest{
 		Model:        r.agent.Provider.Model(),
@@ -592,6 +594,92 @@ func (r *runner) buildRequest(ctx context.Context) (llm.ChatRequest, error) {
 		HistoryTotal: len(r.session.Messages),
 	}
 	return req, nil
+}
+
+// maxToolResultRunes caps how much of a single tool result is sent back
+// to the model. A huge result (e.g. an http_fetch of a large page, now or
+// from an older session) would otherwise blow the model context window.
+const maxToolResultRunes = 32 << 10
+
+// sanitizeHistory makes history safe for OpenAI-compatible providers,
+// which reject an assistant tool_calls message that has no tool response
+// for every id. Runs that abort after emitting calls (runaway guard,
+// budget, crash, pending HITL) can leave such dangling messages; a new
+// run appends its own user message after them, so they are not always
+// the tail. The sanitizer walks the full history and drops any
+// unanswered assistant tool_calls message together with the tool
+// responses that belonged to it (they would otherwise be orphaned).
+func sanitizeHistory(in []core.Message) []core.Message {
+	if len(in) < 2 {
+		return in
+	}
+	drop := map[int]bool{} // indices to drop
+	for i := 0; i < len(in); i++ {
+		m := in[i]
+		if m.Role != core.RoleAssistant || len(m.ToolCalls) == 0 {
+			continue
+		}
+		ids := make(map[string]bool, len(m.ToolCalls))
+		for _, tc := range m.ToolCalls {
+			ids[tc.ID] = true
+		}
+		answeredAt := map[int]string{}
+		for j := i + 1; j < len(in); j++ {
+			if in[j].Role == core.RoleTool && ids[in[j].ToolCallID] {
+				answeredAt[j] = in[j].ToolCallID
+				delete(ids, in[j].ToolCallID)
+				if len(ids) == 0 {
+					break
+				}
+			}
+		}
+		if len(ids) == 0 {
+			continue // every call answered
+		}
+		drop[i] = true
+		for j := range answeredAt {
+			drop[j] = true
+		}
+	}
+	if len(drop) == 0 {
+		return in
+	}
+	out := make([]core.Message, 0, len(in)-len(drop))
+	for i, m := range in {
+		if !drop[i] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// capToolResults returns a copy of history in which oversized tool
+// messages are truncated at the request level. Storage keeps the full
+// payload; only the provider request is capped.
+func capToolResults(in []core.Message) []core.Message {
+	copied := false
+	var out []core.Message
+	for i := range in {
+		m := in[i]
+		if m.Role == core.RoleTool && len(m.Content) > maxToolResultRunes {
+			if !copied {
+				out = append(out, in[:i]...)
+				copied = true
+			}
+			runes := []rune(m.Content)
+			if len(runes) > maxToolResultRunes {
+				runes = runes[:maxToolResultRunes]
+			}
+			m.Content = string(runes) + "\n…[truncated tool result]"
+			out = append(out, m)
+		} else if copied {
+			out = append(out, m)
+		}
+	}
+	if !copied {
+		return in
+	}
+	return out
 }
 
 func (r *runner) tools() map[string]*core.Tool {
