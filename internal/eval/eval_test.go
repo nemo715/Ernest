@@ -30,7 +30,7 @@ func testAgent(t *testing.T) *agent.Agent {
 
 func TestEvalPass(t *testing.T) {
 	a := testAgent(t)
-	res, err := Run(context.Background(), a, Scenario{
+	res, err := Run(context.Background(), AgentRunner{Agent: a}, Scenario{
 		Name:  "math",
 		Input: "6*7?",
 		Expect: Expectation{
@@ -48,7 +48,7 @@ func TestEvalPass(t *testing.T) {
 
 func TestEvalFailOutput(t *testing.T) {
 	a := testAgent(t)
-	res, err := Run(context.Background(), a, Scenario{
+	res, err := Run(context.Background(), AgentRunner{Agent: a}, Scenario{
 		Name:  "wrong",
 		Input: "6*7?",
 		Expect: Expectation{
@@ -70,7 +70,7 @@ func TestEvalFailOutput(t *testing.T) {
 func TestEvalNoToolCalls(t *testing.T) {
 	p := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{{Content: "hi there", FinishReason: "stop"}}})
 	a := agent.New("plain", p)
-	res, err := Run(context.Background(), a, Scenario{
+	res, err := Run(context.Background(), AgentRunner{Agent: a}, Scenario{
 		Name:  "plain",
 		Input: "hello",
 		Expect: Expectation{
@@ -99,7 +99,7 @@ func TestEvalAwaitingApprovalStatus(t *testing.T) {
 	}) (any, error) {
 		return nil, tc.RequestApproval("send_email", "send to "+args.To, nil)
 	})}
-	res, err := Run(context.Background(), a, Scenario{
+	res, err := Run(context.Background(), AgentRunner{Agent: a}, Scenario{
 		Name:  "gated",
 		Input: "send",
 		Expect: Expectation{
@@ -174,7 +174,7 @@ func judgedAgent(t *testing.T, judgeJSON string) *agent.Agent {
 
 func TestEvalJudgePass(t *testing.T) {
 	a := judgedAgent(t, `{"score":0.9,"reason":"correct and concise"}`)
-	res, err := Run(context.Background(), a, Scenario{
+	res, err := Run(context.Background(), AgentRunner{Agent: a}, Scenario{
 		Name:  "sqrt",
 		Input: "sqrt(144)?",
 		Judge: &JudgeConfig{Rubric: "Must give the correct square root."},
@@ -192,7 +192,7 @@ func TestEvalJudgePass(t *testing.T) {
 
 func TestEvalJudgeBelowMin(t *testing.T) {
 	a := judgedAgent(t, `{"score":0.4,"reason":"missing units"}`)
-	res, err := Run(context.Background(), a, Scenario{
+	res, err := Run(context.Background(), AgentRunner{Agent: a}, Scenario{
 		Name:  "sqrt",
 		Input: "sqrt(144)?",
 		Judge: &JudgeConfig{Rubric: "Must include units."},
@@ -213,7 +213,7 @@ func TestEvalJudgeBelowMin(t *testing.T) {
 
 func TestEvalJudgeCustomMin(t *testing.T) {
 	a := judgedAgent(t, `{"score":0.4,"reason":"close enough"}`)
-	res, err := Run(context.Background(), a, Scenario{
+	res, err := Run(context.Background(), AgentRunner{Agent: a}, Scenario{
 		Name:  "sqrt",
 		Input: "sqrt(144)?",
 		Judge: &JudgeConfig{Rubric: "Approximate answers are fine.", MinScore: 0.3},
@@ -228,7 +228,7 @@ func TestEvalJudgeCustomMin(t *testing.T) {
 
 func TestEvalJudgeInvalidJSON(t *testing.T) {
 	a := judgedAgent(t, "sure, that looks right")
-	res, err := Run(context.Background(), a, Scenario{
+	res, err := Run(context.Background(), AgentRunner{Agent: a}, Scenario{
 		Name:  "sqrt",
 		Input: "sqrt(144)?",
 		Judge: &JudgeConfig{Rubric: "Be strict."},

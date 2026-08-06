@@ -19,10 +19,10 @@ live progress instead of waiting for a final answer.
 | **Guardrails** | Token & cost caps, deny-lists, always-require-approval tools, input redaction |
 | **Memory & storage** | Session store (in-memory or SQLite), agent memory, knowledge base |
 | **Streaming** | SSE (`/api/chat`) + WebSocket (`/ws/chat`) with interrupt/steer |
-| **Tracing & audit** | Per-run trace endpoint, full audit log |
+| **Tracing & audit** | Per-run trace endpoint + `POST /api/traces` ingestion from any framework, full audit log |
 | **Interop** | MCP client (stdio/http) & server mode, A2A server with agent cards |
-| **Eval** | Scenario runner (`ernest eval`) for regression-testing agents |
-| **CLI** | `init`, `new`, `run`, `playground`, `doctor`, `eval`, `mcp-serve` |
+| **Eval** | Scenario runner (`ernest eval`) with judge, baseline gates, tool-result shape checks; `--learn` grows the suite from production failures; `replay --endpoint` runs it nightly against a live server with drift alerts |
+| **CLI** | `init`, `new`, `run`, `playground`, `doctor`, `eval`, `replay`, `mcp-serve` |
 | **SDKs** | Python (sync + async), examples in Go; Next.js playground UI |
 
 ## Quickstart

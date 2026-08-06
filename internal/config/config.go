@@ -36,6 +36,10 @@ type Config struct {
 	Agents     []AgentConfig     `json:"agents"`
 	MCPServers []MCPServerConfig `json:"mcpServers,omitempty"`
 	Store      StoreConfig       `json:"store,omitempty"`
+	// Failures, when set, appends a FailureRecord (JSONL) for every
+	// failed run on the server: the production feed that
+	// `ernest eval --learn` turns into regression scenarios.
+	Failures string `json:"failures,omitempty"`
 }
 
 // AgentConfig describes one agent.

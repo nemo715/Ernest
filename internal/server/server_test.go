@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/nemo715/Ernest/internal/agent"
 	"github.com/nemo715/Ernest/internal/audit"
 	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/eval"
 	"github.com/nemo715/Ernest/internal/llm"
 	"github.com/nemo715/Ernest/internal/storage"
 )
@@ -387,5 +390,188 @@ func TestSSEAlsoCapturesTrace(t *testing.T) {
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
 		t.Fatalf("trace status = %d", r2.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// failures feed (the production signal behind `ernest eval --learn`)
+// ---------------------------------------------------------------------------
+
+// newFlakyServer boots a server with an agent that always fails (the
+// runaway-loop guard: 3 identical calculator calls -> "runaway loop
+// detected" -> failed status), a control agent that completes fine,
+// and a failures feed file.
+func newFlakyServer(t *testing.T, feed string) *httptest.Server {
+	t.Helper()
+	call := core.ToolCall{ID: "f1", Name: "calculator", Arguments: []byte(`{"expression":"1+1"}`)}
+	flaky := agent.New("flaky", llm.NewMock(llm.MockConfig{
+		Script: []llm.MockTurn{
+			{ToolCalls: []core.ToolCall{call}, FinishReason: "tool_calls"},
+			{ToolCalls: []core.ToolCall{call}, FinishReason: "tool_calls"},
+			{ToolCalls: []core.ToolCall{call}, FinishReason: "tool_calls"},
+		},
+	}))
+	flaky.Tools = []*core.Tool{core.Calculator}
+	ok := agent.New("ok", llm.NewMock(llm.MockConfig{
+		Script: []llm.MockTurn{{Content: "fine", FinishReason: "stop"}},
+	}))
+	srv, err := New(Options{Agents: []*agent.Agent{flaky, ok}, FailuresPath: feed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		srv.Close()
+	})
+	return ts
+}
+
+func TestServerFailuresFeed(t *testing.T) {
+	feed := filepath.Join(t.TempDir(), "failures.jsonl")
+	ts := newFlakyServer(t, feed)
+
+	resp, err := http.Post(ts.URL+"/api/chat", "application/json",
+		strings.NewReader(`{"agent":"flaky","input":"add 1 and 1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	recs, err := os.ReadFile(feed)
+	if err != nil {
+		t.Fatalf("feed not written: %v", err)
+	}
+	var rec eval.FailureRecord
+	if err := json.Unmarshal(recs, &rec); err != nil {
+		t.Fatalf("feed record invalid: %v (%q)", err, recs)
+	}
+	if rec.Input != "add 1 and 1" {
+		t.Fatalf("input = %q", rec.Input)
+	}
+	if rec.Status != "failed" {
+		t.Fatalf("status = %q", rec.Status)
+	}
+	if len(rec.ToolCalls) == 0 || rec.ToolCalls[0].Name != "calculator" {
+		t.Fatalf("tool calls = %+v", rec.ToolCalls)
+	}
+	// A completed run must NOT land in the feed.
+	before, _ := os.ReadFile(feed)
+	resp2, err := http.Post(ts.URL+"/api/chat", "application/json",
+		strings.NewReader(`{"agent":"ok","input":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+	after, _ := os.ReadFile(feed)
+	if string(before) != string(after) {
+		t.Fatal("completed run polluted the failures feed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// trace ingestion (any framework can push traces)
+// ---------------------------------------------------------------------------
+
+func TestIngestTrace(t *testing.T) {
+	ts := newTestServer(t)
+	body := `{"traceId":"tr-123","name":"langchain-agent","agent":"external","status":"completed","spans":[{"id":"sp-1","runId":"tr-123","name":"llm","kind":"llm","status":"ok","startedAt":"2026-01-01T00:00:00Z","durationMs":10}],"metrics":{"iterations":2,"costCents":1.5}}`
+	resp, err := http.Post(ts.URL+"/api/traces", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("ingest status = %d", resp.StatusCode)
+	}
+
+	r2, err := http.Get(ts.URL + "/api/traces/tr-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d", r2.StatusCode)
+	}
+	var trace struct {
+		Source string           `json:"source"`
+		Spans  []core.TraceSpan `json:"spans"`
+	}
+	if err := json.NewDecoder(r2.Body).Decode(&trace); err != nil {
+		t.Fatal(err)
+	}
+	if trace.Source != "ingested" || len(trace.Spans) != 1 {
+		t.Fatalf("trace = %+v", trace)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HTTP runner (ernest replay against a live server)
+// ---------------------------------------------------------------------------
+
+func TestHTTPRunnerReplay(t *testing.T) {
+	call := core.ToolCall{ID: "r1", Name: "calculator", Arguments: []byte(`{"expression":"6*7"}`)}
+	p := llm.NewMock(llm.MockConfig{
+		Script: []llm.MockTurn{
+			{ToolCalls: []core.ToolCall{call}, FinishReason: "tool_calls"},
+			{Content: "The answer is 42", FinishReason: "stop"},
+			{Content: "The answer is 42", FinishReason: "stop"},
+			{Content: `{"score":0.9,"reason":"correct"}`, FinishReason: "stop"},
+		},
+	})
+	math := agent.New("math", p)
+	math.Tools = []*core.Tool{core.Calculator}
+	srv, err := New(Options{Agents: []*agent.Agent{math}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mathTs := httptest.NewServer(srv.Handler())
+	defer mathTs.Close()
+	defer srv.Close()
+
+	runner := eval.HTTPRunner{Endpoint: mathTs.URL, Agent: "math", JudgeProvider: p}
+	results, err := eval.RunAll(context.Background(), runner, []eval.Scenario{
+		{
+			Name:  "math",
+			Input: "6*7?",
+			Expect: eval.Expectation{
+				OutputContains: []string{"42"},
+				ToolCalls:      []eval.ToolExpectation{{Name: "calculator", ArgsContains: map[string]any{"expression": "6*7"}}},
+			},
+		},
+		{
+			Name:  "judged",
+			Input: "6*7?",
+			Judge: &eval.JudgeConfig{Rubric: "Must say 42."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %d", len(results))
+	}
+	for _, r := range results {
+		if !r.Pass {
+			t.Fatalf("%s failed: %v", r.Name, r.Failures)
+		}
+	}
+	// The judge ran over HTTP too (the script covered the fourth call:
+	// scenario 2's agent turn then its judge turn).
+	if results[1].JudgeScore != 0.9 {
+		t.Fatalf("judge score = %.2f", results[1].JudgeScore)
+	}
+	// Model lookup against the live server.
+	if m := runner.Model(context.Background()); m != "mock-1" {
+		t.Fatalf("model = %q", m)
+	}
+}
+
+func TestHTTPRunnerDown(t *testing.T) {
+	runner := eval.HTTPRunner{Endpoint: "http://127.0.0.1:1", Agent: "x"} // nothing listens on :1
+	if _, err := eval.RunAll(context.Background(), runner, []eval.Scenario{{Name: "x", Input: "hi", Expect: eval.Expectation{Status: "completed"}}}); err == nil {
+		t.Fatal("expected connection error")
 	}
 }

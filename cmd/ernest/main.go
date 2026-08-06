@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -18,6 +19,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/nemo715/Ernest/internal/agent"
 	"github.com/nemo715/Ernest/internal/config"
@@ -28,7 +30,7 @@ import (
 	"github.com/nemo715/Ernest/internal/storage"
 )
 
-const version = "0.1.4"
+const version = "0.1.5"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -55,6 +57,8 @@ func run(args []string) error {
 		return cmdDoctor(args[1:])
 	case "eval":
 		return cmdEval(args[1:])
+	case "replay":
+		return cmdReplay(args[1:])
 	case "mcp-serve":
 		return cmdMCPServe(args[1:])
 	case "version", "--version", "-v":
@@ -64,7 +68,7 @@ func run(args []string) error {
 		usage()
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (init|new|run|eval|mcp-serve|playground|doctor)", args[0])
+		return fmt.Errorf("unknown command %q (init|new|run|eval|replay|mcp-serve|playground|doctor)", args[0])
 	}
 }
 
@@ -76,6 +80,7 @@ Usage:
   ernest new <template> [dir]  scaffold a project from a template (agent|team|workflow|server)
   ernest run [flags]         run an agent from ernest.json
   ernest eval [flags]        run scenario evals against an agent
+  ernest replay [flags]      replay the eval suite against a live server (nightly drift)
   ernest mcp-serve [flags]   expose agents as MCP tools over stdio
   ernest playground [flags]  boot the playground server (web UI backend)
   ernest doctor [flags]      diagnose the environment and configuration
@@ -144,7 +149,7 @@ func main() {
 // scaffoldMod is the go.mod written by init and every `ernest new`
 // template: the project is its own module and imports ernest from the
 // published module path, so scaffolds compile outside the ernest repo.
-const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.4\n"
+const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.5\n"
 
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
@@ -576,6 +581,7 @@ func cmdRun(args []string) error {
 	session := fs.String("session", "", "session id for memory continuity")
 	asJSON := fs.Bool("json", false, "print the full run result as JSON")
 	noMemory := fs.Bool("no-memory", false, "skip session persistence")
+	failuresOut := fs.String("failures-out", "", "append failed runs to this JSONL file (feed for `ernest eval --learn`)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -601,6 +607,12 @@ func cmdRun(args []string) error {
 		if err != nil {
 			return err
 		}
+		if res.Status == core.RunStatusFailed && *failuresOut != "" {
+			if err := appendFailureFile(*failuresOut, failureRecordFromResult(res, ag.Name)); err != nil {
+				return fmt.Errorf("failures-out: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "failure recorded for eval --learn: %s\n", *failuresOut)
+		}
 		return printResult(res, *asJSON)
 	}
 	// Interactive: read lines from stdin, stream output per line.
@@ -616,6 +628,9 @@ func cmdRun(args []string) error {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			continue
 		}
+		if res.Status == core.RunStatusFailed && *failuresOut != "" {
+			_ = appendFailureFile(*failuresOut, failureRecordFromResult(res, ag.Name))
+		}
 		if res.Status == "awaiting_approval" {
 			for _, ap := range res.Approvals {
 				fmt.Printf("[approval needed] %s: %s (resume via UI or SDK)\n", ap.Action, ap.Summary)
@@ -624,6 +639,49 @@ func cmdRun(args []string) error {
 		fmt.Println(res.Output)
 	}
 	return sc.Err()
+}
+
+// failureRecordFromResult builds a FailureRecord from a failed run
+// result. Tool results are rebuilt from the tool messages (the CLI has
+// no event stream); error strings are not persisted in messages, so
+// shape inference mostly applies to the run-level failure.
+func failureRecordFromResult(res *core.RunResult, agentName string) eval.FailureRecord {
+	rec := eval.FailureRecord{
+		RunID:  res.RunID,
+		Agent:  agentName,
+		Output: res.Output,
+		Status: string(res.Status),
+		Error:  res.Error,
+		At:     time.Now(),
+	}
+	for _, m := range res.Messages {
+		if rec.Input == "" && m.Role == core.RoleUser && m.Content != "" {
+			rec.Input = m.Content
+		}
+		if m.Role == core.RoleAssistant {
+			rec.ToolCalls = append(rec.ToolCalls, m.ToolCalls...)
+		}
+		if m.Role == core.RoleTool {
+			content, _ := json.Marshal(m.Content)
+			rec.ToolResults = append(rec.ToolResults, core.ToolResult{ID: m.ToolCallID, Name: m.Name, Content: content})
+		}
+	}
+	return rec
+}
+
+// appendFailureFile appends one FailureRecord line to a JSONL file.
+func appendFailureFile(path string, rec eval.FailureRecord) error {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(data, '\n'))
+	return err
 }
 
 func runOnce(ctx context.Context, ag *agent.Agent, input, session string, noMemory bool) (*core.RunResult, error) {
@@ -682,6 +740,9 @@ func cmdEval(args []string) error {
 	asJSON := fs.Bool("json", false, "print the full summary as JSON")
 	baseline := fs.String("baseline", "", "compare against a saved baseline; regressions exit non-zero")
 	updateBaseline := fs.Bool("update-baseline", false, "save this run as the baseline (default file: eval-baseline.json)")
+	learn := fs.String("learn", "", "learn scenarios from a failures JSONL file (the server's failures feed); generated scenarios are added to the scenarios dir and evaluated in the same run")
+	learnMax := fs.Int("learn-max", 50, "max scenarios to learn in one run")
+	learnJudge := fs.Bool("learn-judge", false, "generate an LLM judge rubric per learned scenario (costs tokens)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -701,6 +762,13 @@ func cmdEval(args []string) error {
 		return fmt.Errorf("agent %q not found (have: %s)", *agentName, agentNames(rt.Agents))
 	}
 
+	ctx := context.Background()
+	if *learn != "" {
+		if err := learnScenarios(ctx, ag, *learn, *scenarios, *learnMax, *learnJudge); err != nil {
+			return err
+		}
+	}
+
 	scs, err := eval.LoadScenarios(*scenarios)
 	if err != nil {
 		return fmt.Errorf("scenarios: %w", err)
@@ -709,7 +777,7 @@ func cmdEval(args []string) error {
 		return fmt.Errorf("no scenarios found in %s", *scenarios)
 	}
 
-	results, err := eval.RunAll(context.Background(), ag, scs)
+	results, err := eval.RunAll(ctx, eval.AgentRunner{Agent: ag}, scs)
 	if err != nil {
 		return err
 	}
@@ -811,6 +879,256 @@ func markOf(pass bool) string {
 	return "FAIL"
 }
 
+// learnScenarios turns production failures into scenarios: reads the
+// failures JSONL, dedupes against the current suite, optionally writes
+// LLM judge rubrics, merges into <scenarios-dir>/generated.json and
+// reports what was learned.
+func learnScenarios(ctx context.Context, ag *agent.Agent, failuresPath, scenariosPath string, max int, withJudge bool) error {
+	recs, err := eval.LoadFailures(failuresPath)
+	if err != nil {
+		return fmt.Errorf("learn: %w", err)
+	}
+	if len(recs) == 0 {
+		return fmt.Errorf("learn: no failure records in %s", failuresPath)
+	}
+	existing, err := eval.LoadScenarios(scenariosPath)
+	if err != nil {
+		return fmt.Errorf("learn: scenarios: %w", err)
+	}
+	learned := eval.LearnFailure(recs, existing, max)
+	if len(learned) == 0 {
+		fmt.Printf("learn: %d failure record(s) already covered by the suite — nothing new\n", len(recs))
+		return nil
+	}
+	scs := make([]eval.Scenario, 0, len(learned))
+	if withJudge {
+		for i := range learned {
+			rubric, err := eval.GenerateRubric(ctx, ag.Provider, learned[i].Record)
+			if err != nil {
+				return fmt.Errorf("learn: rubric for %q: %w", learned[i].Scenario.Name, err)
+			}
+			learned[i].Scenario.Judge = &eval.JudgeConfig{Rubric: rubric}
+			scs = append(scs, learned[i].Scenario)
+		}
+	} else {
+		for i := range learned {
+			scs = append(scs, learned[i].Scenario)
+		}
+	}
+	if err := appendGeneratedScenarios(scenariosPath, scs); err != nil {
+		return fmt.Errorf("learn: write generated scenarios: %w", err)
+	}
+	fmt.Printf("learn: %d new scenario(s) from %d failure record(s) → %s (evaluated below)\n", len(scs), len(recs), generatedPath(scenariosPath))
+	return nil
+}
+
+// appendGeneratedScenarios merges learned scenarios into the
+// generated.json next to the scenarios file/dir, keeping prior learned
+// scenarios (re-learning dedupes against them).
+func appendGeneratedScenarios(scenariosPath string, scs []eval.Scenario) error {
+	out := generatedPath(scenariosPath)
+	var existing []eval.Scenario
+	if data, err := os.ReadFile(out); err == nil {
+		var doc struct {
+			Scenarios []eval.Scenario `json:"scenarios"`
+		}
+		if err := json.Unmarshal(data, &doc); err == nil {
+			existing = doc.Scenarios
+		}
+	}
+	all := append(existing, scs...)
+	data, err := json.MarshalIndent(map[string]any{"scenarios": all}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(out, data, 0o644)
+}
+
+// generatedPath is where learned scenarios live: next to the suite.
+func generatedPath(scenariosPath string) string {
+	dir := filepath.Dir(scenariosPath)
+	return filepath.Join(dir, "generated.json")
+}
+
+// ---------------------------------------------------------------------------
+// replay
+// ---------------------------------------------------------------------------
+
+// cmdReplay runs the eval suite against a LIVE ernest server (nightly
+// drift monitoring): same assertions and baselines as `ernest eval`,
+// but every scenario executes over HTTP against the deployed agent.
+// Judge scoring uses the local config's provider, so the suite still
+// runs offline evals in the deployment's model family.
+func cmdReplay(args []string) error {
+	fs := flag.NewFlagSet("replay", flag.ExitOnError)
+	cfgPath := fs.String("config", config.DefaultFile, "path to ernest.json (judge provider)")
+	agentName := fs.String("agent", "", "agent name on the server (default: first agent)")
+	scenarios := fs.String("scenarios", "scenarios", "scenario file or directory")
+	endpoint := fs.String("endpoint", "", "live ernest server base URL (required)")
+	baseline := fs.String("baseline", "", "compare against a saved baseline; regressions exit non-zero")
+	updateBaseline := fs.Bool("update-baseline", false, "save this run as the baseline (default file: eval-baseline.json)")
+	webhook := fs.String("webhook", "", "POST the drift report to this URL when the replay finishes")
+	timeoutSec := fs.Int("timeout", 120, "per-scenario timeout in seconds")
+	asJSON := fs.Bool("json", false, "print the full report as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *endpoint == "" {
+		return fmt.Errorf("replay: --endpoint is required (e.g. http://prod:9090)")
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	rt, err := cfg.Build(nil)
+	if err != nil {
+		return err
+	}
+	defer rt.Close()
+
+	ag := pickAgent(rt.Agents, *agentName)
+	if ag == nil {
+		return fmt.Errorf("agent %q not found (have: %s)", *agentName, agentNames(rt.Agents))
+	}
+
+	scs, err := eval.LoadScenarios(*scenarios)
+	if err != nil {
+		return fmt.Errorf("scenarios: %w", err)
+	}
+	if len(scs) == 0 {
+		return fmt.Errorf("no scenarios found in %s", *scenarios)
+	}
+
+	ctx := context.Background()
+	runner := eval.HTTPRunner{
+		Endpoint:      *endpoint,
+		Agent:         ag.Name,
+		JudgeProvider: ag.Provider,
+		Timeout:       time.Duration(*timeoutSec) * time.Second,
+	}
+	results, err := eval.RunAll(ctx, runner, scs)
+	if err != nil {
+		return fmt.Errorf("replay: %w", err)
+	}
+	sum := eval.Summarize(ag.Name, results)
+	sum.Model = runner.Model(ctx)
+
+	// Regression gate: compare against a saved baseline.
+	var regs []eval.Regression
+	baselinePath := *baseline
+	if *updateBaseline {
+		if baselinePath == "" {
+			baselinePath = "eval-baseline.json"
+		}
+		if err := eval.SaveBaseline(baselinePath, results); err != nil {
+			return fmt.Errorf("baseline: %w", err)
+		}
+		fmt.Printf("baseline written to %s (%d scenarios)\n\n", baselinePath, len(results))
+	}
+	if baselinePath != "" && !*updateBaseline {
+		base, err := eval.LoadBaseline(baselinePath)
+		if err != nil {
+			return fmt.Errorf("baseline: %w", err)
+		}
+		regs = eval.Regress(results, base)
+	}
+
+	type report struct {
+		*eval.Summary
+		Endpoint    string            `json:"endpoint"`
+		Regressions []eval.Regression `json:"regressions,omitempty"`
+	}
+	out := report{Summary: sum, Endpoint: *endpoint, Regressions: regs}
+	if *asJSON {
+		data, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+	} else {
+		model := sum.Model
+		if model == "" {
+			model = "?"
+		}
+		fmt.Printf("ernest replay — agent %s (%s) @ %s, %d scenarios\n", sum.Agent, model, *endpoint, sum.Scenarios)
+		for _, r := range results {
+			mark := "PASS"
+			if !r.Pass {
+				mark = "FAIL"
+			}
+			line := fmt.Sprintf("  %-4s %-30s %5dms", mark, r.Name, r.DurationMS)
+			if r.TokensIn+r.TokensOut > 0 {
+				line += fmt.Sprintf("  %dtok", r.TokensIn+r.TokensOut)
+			}
+			if r.CostCents > 0 {
+				line += fmt.Sprintf("  $%.4f", r.CostCents/100)
+			}
+			if r.JudgeScore > 0 {
+				line += fmt.Sprintf("  judge %.2f [%s]", r.JudgeScore, r.JudgeVerdict)
+			}
+			fmt.Println(line)
+			if !r.Pass {
+				for _, f := range r.Failures {
+					fmt.Printf("        - %s\n", f)
+				}
+			}
+		}
+		fmt.Printf("\n%d/%d passed  %.2fms total  $%.4f\n", sum.Passed, sum.Scenarios, float64(sum.TotalDurationMS), sum.TotalCostCents/100)
+		if len(regs) > 0 {
+			fmt.Printf("\ndrift vs %s:\n", baselinePath)
+			for _, r := range regs {
+				if r.New {
+					fmt.Printf("  + %-30s new scenario (pass=%v)\n", r.Name, r.NowPass)
+					continue
+				}
+				line := fmt.Sprintf("  %s %-30s was %s now %s", "=", r.Name, markOf(r.WasPass), markOf(r.NowPass))
+				if r.ScoreDelta != 0 {
+					line += fmt.Sprintf("  judge %+.2f", r.ScoreDelta)
+				}
+				if r.Note != "" {
+					line += "  <-- " + r.Note
+				}
+				fmt.Println(line)
+			}
+		}
+	}
+
+	// Drift webhook: best-effort POST of the report to the configured
+	// URL (alerting: PagerDuty, Slack, a Lambda, ...).
+	if *webhook != "" {
+		data, err := json.Marshal(out)
+		if err == nil {
+			if err := postJSON(*webhook, data, 10*time.Second); err != nil {
+				fmt.Fprintf(os.Stderr, "replay: webhook failed: %v\n", err)
+			}
+		}
+	}
+
+	// The gate applies in both output modes.
+	if sum.Failed > 0 {
+		return fmt.Errorf("%d scenario(s) failed against %s", sum.Failed, *endpoint)
+	}
+	if n := eval.CountRegressions(regs); n > 0 {
+		return fmt.Errorf("%d regression(s) vs baseline %s", n, baselinePath)
+	}
+	return nil
+}
+
+// postJSON sends a JSON payload to a URL (webhook delivery).
+func postJSON(url string, data []byte, timeout time.Duration) error {
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("webhook returned %s", resp.Status)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // mcp-serve
 // ---------------------------------------------------------------------------
@@ -854,6 +1172,7 @@ func cmdPlayground(args []string) error {
 	}
 
 	var rt *config.Runtime
+	var failuresPath string
 	if *demo {
 		// Self-contained demo: mock agent + in-memory store, no keys.
 		temp := 0.7
@@ -886,10 +1205,11 @@ func cmdPlayground(args []string) error {
 		if err != nil {
 			return err
 		}
+		failuresPath = cfg.Failures
 	}
 	defer rt.Close()
 
-	srv, err := server.New(server.Options{Agents: rt.Agents, Store: rt.Store, Static: *static})
+	srv, err := server.New(server.Options{Agents: rt.Agents, Store: rt.Store, Static: *static, FailuresPath: failuresPath})
 	if err != nil {
 		return err
 	}

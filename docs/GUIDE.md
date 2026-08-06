@@ -3,7 +3,7 @@
 This guide follows the workflow a real user follows after installing ernest:
 build → scaffold → configure → validate → run. Everything here uses the public
 CLI (`ernest init`, `ernest new`, `ernest run`, `ernest playground`,
-`ernest doctor`, `ernest eval`, `ernest mcp-serve`) and the declarative
+`ernest doctor`, `ernest eval`, `ernest replay`, `ernest mcp-serve`) and the declarative
 `ernest.json` format.
 
 ---
@@ -347,6 +347,98 @@ be compared against real-model runs (the scenarios differ). The mock
 provider makes `ernest eval` fully deterministic in CI — same provider
 family as the agent, so judge scenarios script cleanly.
 
+### Tool-result shape checks (the "silent 200 OK" catcher)
+
+A tool that returns an empty array or an empty string looks like a 200
+OK to monitoring — the next node just types around the void. Shape
+checks make those deterministic eval assertions, not vibes:
+
+```json
+{
+  "name": "search-returns-results",
+  "input": "Find recent pricing pages.",
+  "expect": {
+    "status": "completed",
+    "toolResults": [
+      { "name": "search", "shape": { "minItems": 1 } },
+      { "name": "fetch", "shape": { "requiredFields": ["title"], "fieldTypes": { "title": "string" } } },
+      { "name": "db_query", "errorContains": "sql" }
+    ]
+  }
+}
+```
+
+`shape` supports `requiredFields`, `fieldTypes` (`string | number |
+int | bool | array | object`), `minItems` (arrays) and `minLength`
+(strings). `errorContains` asserts the tool **failed** with a matching
+error — the expected-failure flip side. Both apply to the tool result
+content (double-encoded JSON is unwrapped automatically). No matching
+tool result for a named expectation is itself a failure.
+
+### Self-updating suite: learn scenarios from production failures
+
+Your golden dataset should grow from real user behaviour, not manual
+curation. Point the server at a failures feed and every failed run is
+appended automatically — no SDK changes, no manual step:
+
+```json
+{ "agent": "assistant", "failures": "failures.jsonl" }
+```
+
+What gets captured per failed run: the input, output, status, error and
+the tool calls/results leading up to the failure. (`ernest run
+--failures-out file.jsonl` appends the same records from the CLI.) Then:
+
+```bash
+# turn failures into scenarios, merged into scenarios/generated.json
+ernest eval --config ernest.json --learn failures.jsonl
+
+# …and optionally generate an LLM judge rubric per scenario (costs tokens)
+ernest eval --config ernest.json --learn failures.jsonl --learn-judge
+```
+
+Learning is deterministic and idempotent: each failure is fingerprinted
+(input + failing tool), deduped against the current suite and against
+already-learned records, capped at `--learn-max` (default 50) per run,
+and merged into `generated.json` next to your hand-written scenarios —
+so re-running `--learn` never duplicates. The generated scenarios use
+only deterministic assertions (status, `errorContains`, shape `minItems`
+/ `minLength`), so the suite stays runnable in CI on the mock provider.
+The same run then evaluates the grown suite, and the merged file counts
+as a regression suite for the baseline gate.
+
+### Nightly replay against live production
+
+Evals don't have to wait for a deploy. `ernest replay` runs the same
+suite (same assertions, same baseline engine) against a **live** ernest
+server over HTTP, so golden datasets act as monitoring assets against
+runtime drift:
+
+```bash
+# replay the suite against the deployed agent
+ernest replay --endpoint http://prod.internal:9090 --agent assistant --scenarios eval-cases
+
+# diff against the saved baseline and alert on drift
+ernest replay --endpoint http://prod.internal:9090 --baseline eval-baseline.json
+
+# post the drift report to a webhook (Slack/ops) when the replay finishes
+ernest replay --endpoint http://prod.internal:9090 --baseline eval-baseline.json --webhook https://hooks.example.com/report
+
+# machine-readable report for dashboards
+ernest replay --endpoint http://prod.internal:9090 --json
+```
+
+Exit codes mirror `ernest eval`: non-zero on failed scenarios or
+baseline regressions, so the same command works as a nightly cron job
+and as a deploy-time gate. The report adds the endpoint, per-scenario
+status, and a drift section vs the baseline (new failures, new
+regressions, judge-score moves). Judge scoring runs through the **local**
+config's provider, so the suite evaluates the deployed agent in your own
+model family without calling the server's model twice. `--update-baseline`
+records the live run as the new baseline. Each scenario runs
+`skipMemory: true` with a per-scenario timeout (default 120s,
+`--timeout`).
+
 ## 10. Python SDK
 
 ```bash
@@ -370,6 +462,48 @@ async def main():
     sessions = await ac.list_sessions("assistant")
     trace = await ac.get_run_trace(run_id)
 ```
+
+### Push traces from any framework
+
+ernest isn't the only agent runtime in your stack. `POST /api/traces`
+accepts traces from any framework — LangChain, CrewAI, your own
+harness — and stores them in the same store as native runs, so
+`GET /api/traces/{id}` (and the legacy `/api/runs/{id}/trace`) returns
+them identically (spans carry `"source": "ingested"`). A stdlib-only
+snippet (no SDK required):
+
+```python
+import json
+import urllib.request
+
+trace = {
+    "traceId": "tr-abc123",
+    "name": "langchain-agent",
+    "agent": "support",
+    "status": "failed",
+    "startedAt": "2026-08-02T00:00:00Z",
+    "durationMs": 3420,
+    "spans": [
+        {"id": "sp-1", "runId": "tr-abc123", "name": "llm", "kind": "llm",
+         "status": "ok", "startedAt": "2026-08-02T00:00:00Z", "durationMs": 2100},
+        {"id": "sp-2", "runId": "tr-abc123", "name": "tool:search", "kind": "tool",
+         "status": "error", "input": "{\"q\": \"pricing\"}",
+         "output": "{\"error\": \"empty result\"}",
+         "startedAt": "2026-08-02T00:00:00Z", "durationMs": 400},
+    ],
+    "metrics": {"iterations": 3, "tokens": 842, "costCents": 0.9},
+}
+req = urllib.request.Request(
+    "http://127.0.0.1:9090/api/traces",
+    data=json.dumps(trace).encode(),
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req) as resp:
+    assert resp.status == 202
+```
+
+Ingestion is capped at 4 MB and 2000 spans per trace (HTTP 202 on
+accept, 400 on a malformed payload).
 
 ## 11. Expose agents to other tools
 

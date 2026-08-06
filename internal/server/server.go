@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/nemo715/Ernest/internal/audit"
 	"github.com/nemo715/Ernest/internal/a2a"
 	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/eval"
 	"github.com/nemo715/Ernest/internal/storage"
 )
 
@@ -32,6 +34,11 @@ type Options struct {
 	// Audit, when set, records tool calls, approvals and run outcomes
 	// (exposed at GET /api/audit). A default auditor is used when nil.
 	Audit *audit.Auditor
+	// FailuresPath, when set, appends a FailureRecord (JSONL) for every
+	// failed run — the production feed that `ernest eval --learn` turns
+	// into regression scenarios. The record carries the user input, the
+	// run error and every tool call/result observed during the run.
+	FailuresPath string
 }
 
 // Server is the HTTP API. Create with New; mount Handler() anywhere.
@@ -45,12 +52,42 @@ type Server struct {
 
 	tracesMu sync.Mutex
 	traces   map[string]runTrace // runID -> spans + metrics
+
+	// Failures feed: per-run event buffer flushed to the JSONL file on
+	// run.complete (failed status). Only used when FailuresPath is set.
+	failMu   sync.Mutex
+	failPath string
+	failBuf  map[string]*failRun // runID -> calls/results so far
+}
+
+// failRun is the event accumulation for one run, flushed when the run
+// finishes (failed) to the failures feed.
+type failRun struct {
+	input   string
+	calls   []core.ToolCall
+	results []core.ToolResult
+}
+
+// IngestedTrace is one trace pushed from ANY framework over
+// POST /api/traces (OTEL-style ingestion): the same spans/metrics the
+// server records natively, so non-ernest agents land in the same
+// store as ernest runs.
+type IngestedTrace struct {
+	TraceID    string           `json:"traceId"`
+	Name       string           `json:"name,omitempty"`
+	Agent      string           `json:"agent,omitempty"`
+	Status     string           `json:"status,omitempty"`
+	StartedAt  time.Time        `json:"startedAt,omitempty"`
+	DurationMS int64            `json:"durationMs,omitempty"`
+	Spans      []core.TraceSpan `json:"spans,omitempty"`
+	Metrics    *core.RunMetrics `json:"metrics,omitempty"`
 }
 
 // runTrace is the stored trace of one run (for /api/runs/{id}/trace).
 type runTrace struct {
 	Spans   []core.TraceSpan `json:"spans"`
 	Metrics *core.RunMetrics `json:"metrics,omitempty"`
+	Source  string           `json:"source,omitempty"` // internal | ingested
 }
 
 // New builds a server. Agent names must be unique.
@@ -68,6 +105,10 @@ func New(opts Options) (*Server, error) {
 		traces: map[string]runTrace{},
 		a2a:    a2a.NewServer(raw),
 		mux:    http.NewServeMux(),
+	}
+	if opts.FailuresPath != "" {
+		s.failPath = opts.FailuresPath
+		s.failBuf = map[string]*failRun{}
 	}
 	if s.audit == nil {
 		s.audit = audit.New()
@@ -120,7 +161,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sessions", s.handleSessions)
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.handleSessionGet)
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", s.handleSessionDelete)
-	s.mux.HandleFunc("GET /api/runs/{id}/trace", s.handleRunTrace)
+	s.mux.HandleFunc("POST /api/traces", s.handleIngestTrace)
+	s.mux.HandleFunc("GET /api/traces/{id}", s.handleRunTrace)
+	s.mux.HandleFunc("GET /api/runs/{id}/trace", s.handleRunTrace) // legacy alias
 	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
 	s.mux.HandleFunc("GET /ws/chat", s.handleWS)
 	s.mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentWellKnown)
@@ -337,7 +380,8 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, ch <-chan 
 	}
 }
 
-// capture stores trace spans and metrics from any transport (SSE or WS).
+// capture stores trace spans and metrics from any transport (SSE or WS)
+// and feeds the failures sink (failed runs only).
 func (s *Server) capture(ev core.RunEvent) {
 	if ev.Span != nil {
 		s.recordTrace(ev.RunID, *ev.Span)
@@ -345,12 +389,116 @@ func (s *Server) capture(ev core.RunEvent) {
 	if ev.Metrics != nil {
 		s.recordMetrics(ev.RunID, *ev.Metrics)
 	}
+	s.captureFailure(ev)
 }
+
+// captureFailure accumulates tool calls/results per run and, when a
+// run finishes failed, appends a FailureRecord to the failures feed.
+// The feed is the production signal behind `ernest eval --learn`.
+func (s *Server) captureFailure(ev core.RunEvent) {
+	if s.failPath == "" {
+		return
+	}
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	if ev.ToolCall != nil {
+		b := s.failBuf[ev.RunID]
+		if b == nil {
+			b = &failRun{}
+			s.failBuf[ev.RunID] = b
+		}
+		b.calls = append(b.calls, *ev.ToolCall)
+		return
+	}
+	if ev.ToolResult != nil {
+		b := s.failBuf[ev.RunID]
+		if b == nil {
+			b = &failRun{}
+			s.failBuf[ev.RunID] = b
+		}
+		b.results = append(b.results, *ev.ToolResult)
+		return
+	}
+	if ev.Result == nil {
+		return
+	}
+	b := s.failBuf[ev.RunID]
+	delete(s.failBuf, ev.RunID)
+	if ev.Result.Status != core.RunStatusFailed {
+		return
+	}
+	if b == nil {
+		b = &failRun{}
+	}
+	if b.input == "" {
+		for _, m := range ev.Result.Messages {
+			if m.Role == core.RoleUser {
+				b.input = m.Content
+				break
+			}
+		}
+	}
+	if b.input == "" {
+		return // nothing to learn from without the prompt
+	}
+	rec := eval.FailureRecord{
+		RunID:       ev.Result.RunID,
+		Agent:       ev.Agent,
+		Input:       b.input,
+		Output:      ev.Result.Output,
+		Status:      string(ev.Result.Status),
+		Error:       ev.Result.Error,
+		ToolCalls:   b.calls,
+		ToolResults: b.results,
+		At:          time.Now(),
+	}
+	appendFailureRecord(s.failPath, rec)
+}
+
+// appendFailureRecord appends one record to a JSONL failures feed.
+func appendFailureRecord(path string, rec eval.FailureRecord) {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(data, '\n'))
+}
+
+// handleIngestTrace accepts a trace from any framework (OTEL-style):
+// same shape as the server's native spans, stored under the trace id.
+func (s *Server) handleIngestTrace(w http.ResponseWriter, r *http.Request) {
+	var t IngestedTrace
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&t); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	if t.TraceID == "" {
+		writeError(w, http.StatusBadRequest, "traceId is required")
+		return
+	}
+	if len(t.Spans) > 2000 {
+		writeError(w, http.StatusBadRequest, "too many spans (max 2000)")
+		return
+	}
+	s.tracesMu.Lock()
+	s.traces[t.TraceID] = runTrace{Spans: t.Spans, Metrics: t.Metrics, Source: "ingested"}
+	s.tracesMu.Unlock()
+	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "traceId": t.TraceID, "spans": len(t.Spans)})
+}
+
 
 func (s *Server) recordTrace(runID string, sp core.TraceSpan) {
 	s.tracesMu.Lock()
 	defer s.tracesMu.Unlock()
 	t := s.traces[runID]
+	if t.Source == "" {
+		t.Source = "internal"
+	}
 	t.Spans = append(t.Spans, sp)
 	s.traces[runID] = t
 }
@@ -373,7 +521,7 @@ func (s *Server) handleRunTrace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown run "+id)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runId": id, "spans": t.Spans, "metrics": t.Metrics})
+	writeJSON(w, http.StatusOK, map[string]any{"runId": id, "spans": t.Spans, "metrics": t.Metrics, "source": t.Source})
 }
 
 // handleAudit returns the newest audit entries (query: limit).

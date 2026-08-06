@@ -33,10 +33,11 @@ type ToolExpectation struct {
 
 // Expectation is the pass/fail contract of a scenario.
 type Expectation struct {
-	OutputContains []string          `json:"outputContains,omitempty"`
-	ToolCalls      []ToolExpectation `json:"toolCalls,omitempty"`
-	NoToolCalls    bool              `json:"noToolCalls,omitempty"`
-	Status         string            `json:"status,omitempty"` // completed | awaiting_approval | failed
+	OutputContains []string                `json:"outputContains,omitempty"`
+	ToolCalls      []ToolExpectation       `json:"toolCalls,omitempty"`
+	ToolResults    []ToolResultExpectation `json:"toolResults,omitempty"`
+	NoToolCalls    bool                    `json:"noToolCalls,omitempty"`
+	Status         string                  `json:"status,omitempty"` // completed | awaiting_approval | failed
 }
 
 // JudgeConfig attaches an LLM-as-judge check to a scenario: a second
@@ -94,24 +95,53 @@ type JudgeVerdict struct {
 	Reason string  `json:"reason"`
 }
 
-// Run executes one scenario against the agent and reports pass/fail.
-// Runs are ephemeral (no session persistence) unless opts override it.
-func Run(ctx context.Context, a *agent.Agent, sc Scenario, opts ...agent.RunOptions) (*Result, error) {
+// Runner executes scenario inputs against an agent: in-process
+// (AgentRunner) for `ernest eval`, or over HTTP (HTTPRunner) for
+// `ernest replay` against a live production server. Provider returns
+// the model provider used for judge scoring (the local config's
+// provider in replay mode).
+type Runner interface {
+	RunScenario(ctx context.Context, input string) (*Outcome, error)
+	Provider() llm.Provider
+}
+
+// Outcome is the observable result of running one scenario input: the
+// same fields the deterministic checks inspect, whatever the transport.
+type Outcome struct {
+	Output      string
+	Status      string
+	ToolCalls   []core.ToolCall
+	ToolResults []core.ToolResult
+	Usage       *core.Usage
+	CostCents   float64
+	DurationMS  int64
+}
+
+// AgentRunner runs scenarios in-process against an agent.
+type AgentRunner struct {
+	Agent *agent.Agent
+}
+
+// Provider returns the agent's provider (judge scoring model).
+func (r AgentRunner) Provider() llm.Provider { return r.Agent.Provider }
+
+// RunScenario streams one input through the agent and collects the
+// events the checks need. Runs are ephemeral (no session persistence).
+func (r AgentRunner) RunScenario(ctx context.Context, input string) (*Outcome, error) {
 	start := time.Now()
-	opt := agent.RunOptions{SkipMemory: true}
-	if len(opts) > 0 {
-		opt = opts[0]
-	}
-	ch, err := a.Stream(ctx, sc.Input, opt)
+	ch, err := r.Agent.Stream(ctx, input, agent.RunOptions{SkipMemory: true})
 	if err != nil {
 		return nil, err
 	}
-	var calls []core.ToolCall
+	var o Outcome
 	var res *core.RunResult
 	var metrics *core.RunMetrics
 	for ev := range ch {
 		if ev.ToolCall != nil {
-			calls = append(calls, *ev.ToolCall)
+			o.ToolCalls = append(o.ToolCalls, *ev.ToolCall)
+		}
+		if ev.ToolResult != nil {
+			o.ToolResults = append(o.ToolResults, *ev.ToolResult)
 		}
 		if ev.Metrics != nil {
 			metrics = ev.Metrics
@@ -123,41 +153,60 @@ func Run(ctx context.Context, a *agent.Agent, sc Scenario, opts ...agent.RunOpti
 	if res == nil {
 		return nil, errors.New("run produced no result")
 	}
-	r := &Result{
-		Name:       sc.Name,
-		Output:     res.Output,
-		Status:     string(res.Status),
-		DurationMS: time.Since(start).Milliseconds(),
-		ToolCalls:  len(calls),
-	}
-	if res.Usage != nil {
-		r.TokensIn = res.Usage.InputTokens
-		r.TokensOut = res.Usage.OutputTokens
+	o.Output = res.Output
+	o.Status = string(res.Status)
+	o.Usage = res.Usage
+	o.DurationMS = time.Since(start).Milliseconds()
+	if o.DurationMS == 0 {
+		o.DurationMS = res.DurationMS
 	}
 	if metrics != nil {
-		r.CostCents = metrics.CostCents
+		o.CostCents = metrics.CostCents
 	}
-	if r.DurationMS == 0 {
-		r.DurationMS = res.DurationMS
+	return &o, nil
+}
+
+// Run executes one scenario against a runner and reports pass/fail.
+func Run(ctx context.Context, r Runner, sc Scenario) (*Result, error) {
+	start := time.Now()
+	outcome, err := r.RunScenario(ctx, sc.Input)
+	if err != nil {
+		return nil, err
 	}
+	if outcome == nil {
+		return nil, errors.New("runner returned no outcome")
+	}
+	outcome.DurationMS = time.Since(start).Milliseconds()
+	res := &Result{
+		Name:       sc.Name,
+		Output:     outcome.Output,
+		Status:     outcome.Status,
+		DurationMS: outcome.DurationMS,
+		ToolCalls:  len(outcome.ToolCalls),
+	}
+	if outcome.Usage != nil {
+		res.TokensIn = outcome.Usage.InputTokens
+		res.TokensOut = outcome.Usage.OutputTokens
+	}
+	res.CostCents = outcome.CostCents
 	fail := func(format string, args ...any) {
-		r.Failures = append(r.Failures, fmt.Sprintf(format, args...))
+		res.Failures = append(res.Failures, fmt.Sprintf(format, args...))
 	}
 
-	if sc.Expect.Status != "" && r.Status != sc.Expect.Status {
-		fail("status = %s, want %s", r.Status, sc.Expect.Status)
+	if sc.Expect.Status != "" && res.Status != sc.Expect.Status {
+		fail("status = %s, want %s", res.Status, sc.Expect.Status)
 	}
 	for _, want := range sc.Expect.OutputContains {
-		if !strings.Contains(r.Output, want) {
-			fail("output %q does not contain %q", r.Output, want)
+		if !strings.Contains(res.Output, want) {
+			fail("output %q does not contain %q", res.Output, want)
 		}
 	}
-	if sc.Expect.NoToolCalls && len(calls) > 0 {
-		fail("expected no tool calls, got %d (%s)", len(calls), calls[0].Name)
+	if sc.Expect.NoToolCalls && len(outcome.ToolCalls) > 0 {
+		fail("expected no tool calls, got %d (%s)", len(outcome.ToolCalls), outcome.ToolCalls[0].Name)
 	}
 	for _, want := range sc.Expect.ToolCalls {
 		matched := false
-		for _, c := range calls {
+		for _, c := range outcome.ToolCalls {
 			if c.Name != want.Name {
 				continue
 			}
@@ -177,40 +226,69 @@ func Run(ctx context.Context, a *agent.Agent, sc Scenario, opts ...agent.RunOpti
 			fail("no tool call matching %s %v", want.Name, want.ArgsContains)
 		}
 	}
+	for _, want := range sc.Expect.ToolResults {
+		matched := false
+		for _, tr := range outcome.ToolResults {
+			if tr.Name != want.Name {
+				continue
+			}
+			matched = true
+			if want.ErrorContains != "" {
+				switch {
+				case tr.Error == "":
+					fail("tool %s: expected failure containing %q, but it succeeded", want.Name, want.ErrorContains)
+				case !strings.Contains(tr.Error, want.ErrorContains):
+					fail("tool %s failed with %q, want contains %q", want.Name, tr.Error, want.ErrorContains)
+				}
+			}
+			if want.Shape != nil {
+				if tr.Error != "" {
+					fail("tool %s failed: %s (shape checks need a successful result)", want.Name, tr.Error)
+				} else {
+					for _, m := range checkShape(tr.Content, want.Shape) {
+						fail("tool %s: %s", want.Name, m)
+					}
+				}
+			}
+		}
+		if !matched {
+			fail("no tool result matching %s", want.Name)
+		}
+	}
 
 	// LLM-as-judge: score the output against the rubric. The judge uses
-	// the agent's provider so CI runs stay deterministic (script the
+	// the runner's provider so CI runs stay deterministic (script the
 	// judge turn in the mock) and production runs use the same model
 	// family as the agent (or the judge's own model override).
 	if sc.Judge != nil {
-		verdict, jerr := judge(ctx, a.Provider, sc, r)
+		verdict, jerr := judge(ctx, r.Provider(), sc, res)
 		if jerr != nil {
 			fail("judge: %v", jerr)
 		} else {
-			r.JudgeScore = verdict.Score
-			r.JudgeReason = verdict.Reason
+			res.JudgeScore = verdict.Score
+			res.JudgeReason = verdict.Reason
 			minScore := sc.Judge.MinScore
 			if minScore <= 0 {
 				minScore = 0.7
 			}
 			if verdict.Score >= minScore {
-				r.JudgeVerdict = "pass"
+				res.JudgeVerdict = "pass"
 			} else {
-				r.JudgeVerdict = "fail"
+				res.JudgeVerdict = "fail"
 				fail("judge score %.2f < min %.2f: %s", verdict.Score, minScore, verdict.Reason)
 			}
 		}
 	}
 
-	r.Pass = len(r.Failures) == 0
-	return r, nil
+	res.Pass = len(res.Failures) == 0
+	return res, nil
 }
 
-// RunAll executes scenarios sequentially against the agent.
-func RunAll(ctx context.Context, a *agent.Agent, scenarios []Scenario) ([]*Result, error) {
+// RunAll executes scenarios sequentially against the runner.
+func RunAll(ctx context.Context, r Runner, scenarios []Scenario) ([]*Result, error) {
 	out := make([]*Result, 0, len(scenarios))
 	for _, sc := range scenarios {
-		res, err := Run(ctx, a, sc)
+		res, err := Run(ctx, r, sc)
 		if err != nil {
 			return nil, fmt.Errorf("scenario %q: %w", sc.Name, err)
 		}
