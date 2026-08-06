@@ -49,3 +49,6 @@ run.txt
 python/build/
 python/*.egg-info/
 pip.log
+
+examples/quantum-lab/playground.*
+
