@@ -276,19 +276,76 @@ a.RedactReplacement = "[SSN]"
 
 ## 9. Evals
 
-Scenario files are plain JSON — one scenario per line, or a document with a
-`scenarios` array; point at a file or a directory:
+`ernest eval` is a regression harness: declarative scenarios check an
+agent's behaviour, and a saved baseline turns quality drift into a
+non-zero CI exit. Two layers per scenario:
+
+- **Deterministic assertions** (free, run anywhere, mock in CI): status,
+  output substrings, tool calls and their arguments.
+- **LLM-as-judge** (scores quality on 0..1 against a rubric): a second
+  model call grades the output. Uses the agent's provider — mock keeps
+  it deterministic, real models judge real answers. `judge.model`
+  overrides the judging model.
+
+Scenario files are JSON — a `{"scenarios": [...]}` document, or a single
+scenario; point at a file or a directory:
 
 ```json
-{"name":"math","input":"6*7?","expect":{"status":"completed","noToolCalls":true}}
+{
+  "scenarios": [
+    {
+      "name": "math-exact",
+      "input": "What is 17 * 23? Use the calculator tool.",
+      "expect": {
+        "status": "completed",
+        "toolCalls": [
+          { "name": "calculator", "argsContains": { "expression": "17*23" } }
+        ],
+        "outputContains": ["391"]
+      }
+    },
+    {
+      "name": "quality-explains-math",
+      "input": "Explain in 2-3 sentences why 17 * 23 = 391.",
+      "expect": { "status": "completed" },
+      "judge": {
+        "rubric": "Must state 391, show 17*23, and explain the multiplication clearly.",
+        "minScore": 0.7
+      }
+    }
+  ]
+}
 ```
+
+Expectations: `status` (`completed` | `awaiting_approval` | `failed`),
+`outputContains`, `noToolCalls`, `toolCalls` (with `argsContains` —
+string arguments are compared whitespace-insensitively, so real-model
+formatting like `"17 * 23"` still matches `"17*23"`). Judge requires
+`rubric`; `minScore` defaults to 0.7. Tool-argument matches and judge
+scores are reported per scenario, together with tokens and estimated
+cost, so evals double as a cost ledger.
 
 ```bash
-ernest.exe eval --config ernest.json --agent assistant --scenarios eval-cases
+# run scenarios (exits non-zero on any failure)
+ernest eval --config ernest.json --agent assistant --scenarios eval-cases
+
+# record the current results as a baseline (per config/provider!)
+ernest eval --config ernest.json --scenarios eval-cases --update-baseline
+
+# CI gate: diff against the baseline, exit non-zero on regressions
+ernest eval --config ernest.json --scenarios eval-cases --baseline eval-baseline.json
 ```
 
-Expectations can assert on status (`completed`/`error`), tool call counts,
-substrings, and exact outputs. Run them in CI as a regression gate.
+Regression rules: a scenario that passed in the baseline and fails now
+is a regression (exit non-zero); so is a scenario that vanished from the
+suite. Judge-score moves of >= 0.25 are reported as quality deltas even
+when the scenario still passes. `--json` prints the full summary (agent,
+model, per-scenario tokens/cost/judge, regressions) for dashboards.
+
+Keep separate baseline files per provider: a mock-mode baseline cannot
+be compared against real-model runs (the scenarios differ). The mock
+provider makes `ernest eval` fully deterministic in CI — same provider
+family as the agent, so judge scenarios script cleanly.
 
 ## 10. Python SDK
 

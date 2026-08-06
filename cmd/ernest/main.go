@@ -28,7 +28,7 @@ import (
 	"github.com/nemo715/Ernest/internal/storage"
 )
 
-const version = "0.1.3"
+const version = "0.1.4"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -144,7 +144,7 @@ func main() {
 // scaffoldMod is the go.mod written by init and every `ernest new`
 // template: the project is its own module and imports ernest from the
 // published module path, so scaffolds compile outside the ernest repo.
-const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.3\n"
+const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.4\n"
 
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
@@ -679,7 +679,9 @@ func cmdEval(args []string) error {
 	cfgPath := fs.String("config", config.DefaultFile, "path to ernest.json")
 	agentName := fs.String("agent", "", "agent name (default: first agent)")
 	scenarios := fs.String("scenarios", "scenarios", "scenario file or directory")
-	asJSON := fs.Bool("json", false, "print results as JSON")
+	asJSON := fs.Bool("json", false, "print the full summary as JSON")
+	baseline := fs.String("baseline", "", "compare against a saved baseline; regressions exit non-zero")
+	updateBaseline := fs.Bool("update-baseline", false, "save this run as the baseline (default file: eval-baseline.json)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -711,35 +713,102 @@ func cmdEval(args []string) error {
 	if err != nil {
 		return err
 	}
+	sum := eval.Summarize(ag.Name, results)
+	sum.Model = ag.Provider.Model()
+
+	// Regression gate: compare against a saved baseline.
+	var regs []eval.Regression
+	baselinePath := *baseline
+	if *updateBaseline {
+		if baselinePath == "" {
+			baselinePath = "eval-baseline.json"
+		}
+		if err := eval.SaveBaseline(baselinePath, results); err != nil {
+			return fmt.Errorf("baseline: %w", err)
+		}
+		fmt.Printf("baseline written to %s (%d scenarios)\n\n", baselinePath, len(results))
+	}
+	if baselinePath != "" && !*updateBaseline {
+		base, err := eval.LoadBaseline(baselinePath)
+		if err != nil {
+			return fmt.Errorf("baseline: %w", err)
+		}
+		regs = eval.Regress(results, base)
+	}
+
 	if *asJSON {
-		data, err := json.MarshalIndent(results, "", "  ")
+		type report struct {
+			*eval.Summary
+			Regressions []eval.Regression `json:"regressions,omitempty"`
+		}
+		out := report{Summary: sum, Regressions: regs}
+		data, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {
 			return err
 		}
 		fmt.Println(string(data))
 	} else {
-		passed := 0
-		fmt.Printf("ernest eval — agent %s, %d scenarios\n", ag.Name, len(results))
+		fmt.Printf("ernest eval — agent %s (%s), %d scenarios\n", sum.Agent, sum.Model, sum.Scenarios)
 		for _, r := range results {
 			mark := "PASS"
 			if !r.Pass {
 				mark = "FAIL"
 			}
-			fmt.Printf("  %-4s %-30s %5dms  %s\n", mark, r.Name, r.DurationMS, r.Status)
-			if r.Pass {
-				passed++
-			} else {
+			line := fmt.Sprintf("  %-4s %-30s %5dms", mark, r.Name, r.DurationMS)
+			if r.TokensIn+r.TokensOut > 0 {
+				line += fmt.Sprintf("  %dtok", r.TokensIn+r.TokensOut)
+			}
+			if r.CostCents > 0 {
+				line += fmt.Sprintf("  $%.4f", r.CostCents/100)
+			}
+			if r.JudgeScore > 0 {
+				line += fmt.Sprintf("  judge %.2f [%s]", r.JudgeScore, r.JudgeVerdict)
+			}
+			fmt.Println(line)
+			if !r.Pass {
 				for _, f := range r.Failures {
 					fmt.Printf("        - %s\n", f)
 				}
 			}
 		}
-		fmt.Printf("%d/%d scenarios passed\n", passed, len(results))
-		if passed != len(results) {
-			return fmt.Errorf("%d scenario(s) failed", len(results)-passed)
+		fmt.Printf("\n%d/%d passed  %.2fms total  $%.4f\n", sum.Passed, sum.Scenarios, float64(sum.TotalDurationMS), sum.TotalCostCents/100)
+		if len(regs) > 0 {
+			fmt.Printf("\nregression vs %s:\n", baselinePath)
+			for _, r := range regs {
+				if r.New {
+					fmt.Printf("  + %-30s new scenario (pass=%v)\n", r.Name, r.NowPass)
+					continue
+				}
+				line := fmt.Sprintf("  %s %-30s was %s now %s", "=", r.Name, markOf(r.WasPass), markOf(r.NowPass))
+				if r.ScoreDelta != 0 {
+					line += fmt.Sprintf("  judge %+.2f", r.ScoreDelta)
+				}
+				if r.Note != "" {
+					line += "  <-- " + r.Note
+				}
+				fmt.Println(line)
+			}
+		}
+		if n := eval.CountRegressions(regs); n > 0 {
+			return fmt.Errorf("%d regression(s) vs baseline %s", n, baselinePath)
 		}
 	}
+	// The gate applies in both output modes: failed scenarios or
+	// regressions always exit non-zero so CI sees a failed eval.
+	if sum.Failed > 0 {
+		return fmt.Errorf("%d scenario(s) failed", sum.Failed)
+	}
+	if n := eval.CountRegressions(regs); n > 0 {
+		return fmt.Errorf("%d regression(s) vs baseline %s", n, baselinePath)
+	}
 	return nil
+}
+
+func markOf(pass bool) string {
+	if pass {
+		return "PASS"
+	}
+	return "FAIL"
 }
 
 // ---------------------------------------------------------------------------

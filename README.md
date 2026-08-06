@@ -100,6 +100,18 @@ model (gpt-4o-mini via OpenRouter) and **the model decides delegation
 itself**; without a key it falls back to scripted mock providers, so it also
 runs offline and deterministically for demos and CI.
 
+### 4. Example apps
+
+| App | What it shows | Dir |
+|---|---|---|
+| **Desk** | 3-agent team (lead → researcher, writer) with live delegation | `examples/desk` |
+| **Research Lab** | 4-agent PhD team (PI, reviewer, analyst, writer) + SSE dashboard UI | `examples/research-lab` |
+| **CLAW** | Local AI worker (files, shell, browser) with HITL approval UI | `examples/claw` |
+
+Each example is its own Go module and imports ernest from the published
+module path. With `OPENROUTER_API_KEY` set they run on a real model;
+without it they fall back to scripted mock providers.
+
 ## Python SDK
 
 ```bash

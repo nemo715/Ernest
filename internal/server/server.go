@@ -72,6 +72,9 @@ func New(opts Options) (*Server, error) {
 	if s.audit == nil {
 		s.audit = audit.New()
 	}
+	if s.store == nil {
+		s.store = storage.NewInMemoryStore()
+	}
 	for _, a := range opts.Agents {
 		if a == nil || a.Name == "" {
 			return nil, core.NewError(core.KindValidation, "server: agent without name")
@@ -81,10 +84,14 @@ func New(opts Options) (*Server, error) {
 		}
 		// Wrap: the served instance carries audit hooks; the caller's
 		// agent is never mutated.
-		s.agents[a.Name] = s.wrapAgent(a)
-	}
-	if s.store == nil {
-		s.store = storage.NewInMemoryStore()
+		wrapped := s.wrapAgent(a)
+		// HITL resume replays the stored session: give agents without
+		// their own Memory/Store the server's store so approvals pause
+		// and resume out of the box.
+		if wrapped.Store == nil && wrapped.Memory == nil {
+			wrapped.Store = s.store
+		}
+		s.agents[a.Name] = wrapped
 	}
 	s.routes()
 	return s, nil
