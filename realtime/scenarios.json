@@ -1,0 +1,50 @@
+{
+  "scenarios": [
+    {
+      "name": "real-arithmetic",
+      "input": "What is 17*23? Use the calculator tool and give the exact number.",
+      "expect": {
+        "status": "completed",
+        "toolCalls": [{ "name": "calculator" }],
+        "outputContains": ["391"]
+      }
+    },
+    {
+      "name": "real-time",
+      "input": "What is the current UTC time? Use the now tool.",
+      "expect": {
+        "status": "completed",
+        "toolCalls": [{ "name": "now" }],
+        "outputContains": ["UTC"]
+      }
+    },
+    {
+      "name": "real-web",
+      "input": "Fetch https://example.com and tell me what the page title is.",
+      "expect": {
+        "status": "completed",
+        "toolCalls": [{ "name": "http_fetch" }],
+        "outputContains": ["Example Domain"]
+      }
+    },
+    {
+      "name": "real-context",
+      "input": "hello",
+      "expect": {
+        "status": "completed",
+        "contextContains": ["You are a helpful assistant. Use tools when they help."]
+      }
+    },
+    {
+      "name": "real-judge",
+      "input": "What is 17*23?",
+      "expect": {
+        "status": "completed"
+      },
+      "judge": {
+        "rubric": "The final answer must state the exact number 391.",
+        "minScore": 0.7
+      }
+    }
+  ]
+}

@@ -40,6 +40,8 @@ _demo/
 .benchmarks/
 test-out.txt
 chat.json
+realtime/playground.*
+realtime/replay-*.json
 
 # Build artifacts and scratch logs
 *.log

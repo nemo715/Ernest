@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -360,6 +361,54 @@ func TestMemoryPersistence(t *testing.T) {
 	}
 	if users != 2 {
 		t.Fatalf("second request must include both user messages, got %d", users)
+	}
+}
+
+// TestResumedSessionToolCallNilToolCache: a session persisted WITHOUT
+// tool calls round-trips through JSON with toolCache omitted (omitempty),
+// so the reloaded session has a nil ToolCache. The next run that calls a
+// tool must not panic on the nil map (regression: assignment to entry in
+// nil map, surfaced as a swallowed panic -> nil,nil result crash in the
+// CLI).
+func TestResumedSessionToolCallNilToolCache(t *testing.T) {
+	p := mockScripted(t, []llm.MockTurn{
+		{Content: "remembered", FinishReason: "stop"},
+		{ToolCalls: []core.ToolCall{{ID: "c1", Name: "calculator", Arguments: []byte(`{"expression":"6*7"}`)}}, FinishReason: "tool_calls"},
+		{Content: "the answer is 42", FinishReason: "stop"},
+	}, llm.MockTurn{})
+	store, err := storage.NewSQLiteStore(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	a := New("mem", p)
+	a.Store = store
+	a.Tools = []*core.Tool{core.Calculator}
+	ctx := context.Background()
+
+	res1, err := a.Chat(ctx, "remember 7", RunOptions{SessionID: "s-cache"})
+	if err != nil || res1.Status != core.RunStatusCompleted {
+		t.Fatalf("turn 1: status=%v err=%v", res1, err)
+	}
+	// The persisted session has no tool calls: reloading it must yield a
+	// nil ToolCache — the exact regression scenario.
+	sess, err := store.Get(ctx, "s-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ToolCache != nil {
+		t.Fatalf("precondition: expected nil ToolCache on reload, got %+v", sess.ToolCache)
+	}
+
+	res2, err := a.Chat(ctx, "what is it times 6", RunOptions{SessionID: "s-cache"})
+	if err != nil {
+		t.Fatalf("turn 2 must not fail: %v", err)
+	}
+	if res2.Status != core.RunStatusCompleted {
+		t.Fatalf("turn 2 status = %s", res2.Status)
+	}
+	if !strings.Contains(res2.Output, "42") {
+		t.Fatalf("turn 2 output = %q (tool result must have reached the model)", res2.Output)
 	}
 }
 

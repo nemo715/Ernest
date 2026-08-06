@@ -68,10 +68,12 @@ func (r *runner) emitEvent(ev core.RunEvent) {
 
 // run executes the full loop. When resume is true the user message has
 // already been recorded and the loop continues from tool execution.
-func (r *runner) run(ctx context.Context, input string, resume bool) (*core.RunResult, error) {
+func (r *runner) run(ctx context.Context, input string, resume bool) (result *core.RunResult, err error) {
 	defer func() {
 		if p := recover(); p != nil {
-			r.fail(ctx, fmt.Sprintf("panic in run: %v", p))
+			// Named returns: a recovered panic must still surface as a
+			// failed result, otherwise the caller sees (nil, nil).
+			result, err = r.fail(ctx, fmt.Sprintf("panic in run: %v", p))
 		}
 	}()
 	// Redact PII in the user input before it enters history or the model.
@@ -95,7 +97,7 @@ func (r *runner) run(ctx context.Context, input string, resume bool) (*core.RunR
 		}
 	}
 
-	result, err := r.loop(ctx)
+	result, err = r.loop(ctx)
 	if err != nil {
 		if errors.Is(err, errAwaitingApproval) {
 			out := r.buildResult(core.RunStatusAwaitingApproval, "", nil)
@@ -134,6 +136,11 @@ func (r *runner) resume(ctx context.Context, decision core.ApprovalDecision) (*c
 	// Resolve the approval record.
 	now := time.Now().UTC()
 	var pending []core.ApprovalRequest
+	// Loaded sessions may have a nil ResolvedApprovals map
+	// (resolvedApprovals is omitempty in storage).
+	if sess.ResolvedApprovals == nil {
+		sess.ResolvedApprovals = map[string]core.ApprovalDecision{}
+	}
 	for _, ap := range sess.PendingApprovals {
 		if ap.ID == decision.ApprovalID {
 			ap.Status = "rejected"
@@ -279,6 +286,11 @@ func (r *runner) executeTurn(ctx context.Context, pcs []storage.PendingToolCall)
 	blockedIDs := map[string]bool{}
 	for _, pc := range blocked {
 		blockedIDs[pc.Call.ID] = true
+	}
+	// Loaded sessions may have a nil ToolCache (toolCache is omitempty
+	// in storage): initialize before writing results.
+	if r.session.ToolCache == nil {
+		r.session.ToolCache = map[string]json.RawMessage{}
 	}
 	for _, res := range results {
 		if res.ID == "" || blockedIDs[res.ID] {
