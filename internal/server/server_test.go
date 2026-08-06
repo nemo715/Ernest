@@ -472,6 +472,113 @@ func TestServerFailuresFeed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// runs list + failures endpoint (dev console data)
+// ---------------------------------------------------------------------------
+
+func TestRunTraceContext(t *testing.T) {
+	ts := newTestServer(t)
+	resp, err := http.Post(ts.URL+"/api/chat", "application/json",
+		strings.NewReader(`{"agent":"assistant","input":"hi","sessionId":"s-ctx"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	r2, err := http.Get(ts.URL + "/api/runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Body.Close()
+	var list struct {
+		Runs []struct {
+			RunID  string `json:"runId"`
+			Agent  string `json:"agent"`
+			Status string `json:"status"`
+		} `json:"runs"`
+	}
+	if err := json.NewDecoder(r2.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Runs) != 1 || list.Runs[0].Agent != "assistant" || list.Runs[0].Status != "completed" {
+		t.Fatalf("runs = %+v", list.Runs)
+	}
+	runID := list.Runs[0].RunID
+
+	// The trace must carry the assembled context: instructions the
+	// model actually saw, plus how much history was sent.
+	r3, err := http.Get(ts.URL + "/api/runs/" + runID + "/trace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r3.Body.Close()
+	var trace struct {
+		Context *core.RunContext `json:"context"`
+	}
+	if err := json.NewDecoder(r3.Body).Decode(&trace); err != nil {
+		t.Fatal(err)
+	}
+	if trace.Context == nil {
+		t.Fatal("trace has no context")
+	}
+	if !strings.Contains(trace.Context.SystemPrompt, "You are a helpful assistant.") {
+		t.Fatalf("system prompt = %q", trace.Context.SystemPrompt)
+	}
+	if trace.Context.HistorySent != 1 || trace.Context.HistoryTotal != 1 {
+		t.Fatalf("history = %+v", trace.Context)
+	}
+}
+
+func TestFailuresEndpoint(t *testing.T) {
+	feed := filepath.Join(t.TempDir(), "failures.jsonl")
+	ts := newFlakyServer(t, feed)
+
+	// No feed configured -> 404 with a clear message.
+	ts2 := newTestServer(t)
+	resp, err := http.Get(ts2.URL + "/api/failures")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("no-feed status = %d", resp.StatusCode)
+	}
+
+	resp, err = http.Post(ts.URL+"/api/chat", "application/json",
+		strings.NewReader(`{"agent":"flaky","input":"add 1 and 1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	r2, err := http.Get(ts.URL + "/api/failures")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", r2.StatusCode)
+	}
+	var out struct {
+		Records []json.RawMessage `json:"records"`
+	}
+	if err := json.NewDecoder(r2.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Records) != 1 {
+		t.Fatalf("records = %d", len(out.Records))
+	}
+	var rec eval.FailureRecord
+	if err := json.Unmarshal(out.Records[0], &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Status != "failed" || rec.Input != "add 1 and 1" {
+		t.Fatalf("record = %+v", rec)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // trace ingestion (any framework can push traces)
 // ---------------------------------------------------------------------------
 

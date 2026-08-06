@@ -202,6 +202,136 @@ func (c *Client) Call(ctx context.Context, name string, arguments map[string]any
 	return &out, nil
 }
 
+// Resource is one entry of a server's resources/list (MCP resources:
+// context the host can surface to the model — documents, logs, files).
+type Resource struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+// ResourceContent is one item of a resources/read result.
+type ResourceContent struct {
+	URI      string `json:"uri"`
+	MimeType string `json:"mimeType,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"` // base64-encoded binary
+}
+
+// PromptArgument describes one argument of an MCP prompt template.
+type PromptArgument struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+// Prompt is one entry of a server's prompts/list (reusable prompt
+// templates that the host can expand and feed to a model).
+type Prompt struct {
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
+}
+
+// PromptContent is one message's content in a prompts/get result.
+type PromptContent struct {
+	Type string `json:"type"` // text | image
+	Text string `json:"text,omitempty"`
+}
+
+// PromptMessage is one message of a prompts/get result.
+type PromptMessage struct {
+	Role    string        `json:"role"` // user | assistant
+	Content PromptContent `json:"content"`
+}
+
+// PromptResult is the expanded prompt returned by prompts/get.
+type PromptResult struct {
+	Description string          `json:"description,omitempty"`
+	Messages    []PromptMessage `json:"messages"`
+}
+
+// Resources lists the server's MCP resources.
+func (c *Client) Resources(ctx context.Context) ([]Resource, error) {
+	if err := c.initialize(ctx); err != nil {
+		return nil, err
+	}
+	res, err := c.request(ctx, "resources/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Resources []Resource `json:"resources"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, core.NewError(core.KindMCP, "mcp: bad resources/list result: "+err.Error(), err)
+	}
+	return out.Resources, nil
+}
+
+// ReadResource reads one MCP resource by URI.
+func (c *Client) ReadResource(ctx context.Context, uri string) ([]ResourceContent, error) {
+	if uri == "" {
+		return nil, core.NewError(core.KindValidation, "mcp: resource uri is required")
+	}
+	if err := c.initialize(ctx); err != nil {
+		return nil, err
+	}
+	res, err := c.request(ctx, "resources/read", map[string]any{"uri": uri})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Contents []ResourceContent `json:"contents"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, core.NewError(core.KindMCP, "mcp: bad resources/read result: "+err.Error(), err)
+	}
+	return out.Contents, nil
+}
+
+// Prompts lists the server's prompt templates.
+func (c *Client) Prompts(ctx context.Context) ([]Prompt, error) {
+	if err := c.initialize(ctx); err != nil {
+		return nil, err
+	}
+	res, err := c.request(ctx, "prompts/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Prompts []Prompt `json:"prompts"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, core.NewError(core.KindMCP, "mcp: bad prompts/list result: "+err.Error(), err)
+	}
+	return out.Prompts, nil
+}
+
+// GetPrompt expands one prompt template with the given arguments.
+func (c *Client) GetPrompt(ctx context.Context, name string, args map[string]string) (*PromptResult, error) {
+	if name == "" {
+		return nil, core.NewError(core.KindValidation, "mcp: prompt name is required")
+	}
+	if err := c.initialize(ctx); err != nil {
+		return nil, err
+	}
+	params := map[string]any{"name": name}
+	if len(args) > 0 {
+		params["arguments"] = args
+	}
+	res, err := c.request(ctx, "prompts/get", params)
+	if err != nil {
+		return nil, err
+	}
+	var out PromptResult
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, core.NewError(core.KindMCP, "mcp: bad prompts/get result: "+err.Error(), err)
+	}
+	return &out, nil
+}
+
 // AsCoreTools converts the server's tools into ernest tools, ready to be
 // attached to an agent. Tool calls are forwarded to the MCP server; a
 // result flagged isError surfaces as a tool error to the model.

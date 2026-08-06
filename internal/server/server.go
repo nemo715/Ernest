@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -85,9 +86,12 @@ type IngestedTrace struct {
 
 // runTrace is the stored trace of one run (for /api/runs/{id}/trace).
 type runTrace struct {
-	Spans   []core.TraceSpan `json:"spans"`
-	Metrics *core.RunMetrics `json:"metrics,omitempty"`
-	Source  string           `json:"source,omitempty"` // internal | ingested
+	Spans     []core.TraceSpan   `json:"spans"`
+	Metrics   *core.RunMetrics   `json:"metrics,omitempty"`
+	Source    string             `json:"source,omitempty"` // internal | ingested
+	Agent     string             `json:"agent,omitempty"`
+	StartedAt time.Time          `json:"startedAt,omitempty"`
+	Context   *core.RunContext   `json:"context,omitempty"` // what the model saw
 }
 
 // New builds a server. Agent names must be unique.
@@ -165,12 +169,24 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/traces/{id}", s.handleRunTrace)
 	s.mux.HandleFunc("GET /api/runs/{id}/trace", s.handleRunTrace) // legacy alias
 	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
+	s.mux.HandleFunc("GET /api/runs", s.handleRuns)
+	s.mux.HandleFunc("GET /api/failures", s.handleFailures)
 	s.mux.HandleFunc("GET /ws/chat", s.handleWS)
 	s.mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentWellKnown)
 	s.mux.HandleFunc("POST /a2a/{agent}", s.handleA2A)
 	s.mux.HandleFunc("GET /a2a/{agent}/card", s.handleA2ACard)
 	if s.static != "" {
-		s.mux.Handle("/", http.FileServer(http.Dir(s.static)))
+		fs := http.FileServer(http.Dir(s.static))
+		s.mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// SPA fallback for the dev console: dynamic routes like
+			// /runs/<id> have no file on disk. Extensionless paths that
+			// don't exist as files render index.html; the client-side
+			// router resolves the route and fetches the data.
+			if base := path.Base(r.URL.Path); base != "." && !strings.Contains(base, ".") {
+				r.URL.Path = "/"
+			}
+			fs.ServeHTTP(w, r)
+		}))
 	}
 }
 
@@ -389,6 +405,12 @@ func (s *Server) capture(ev core.RunEvent) {
 	if ev.Metrics != nil {
 		s.recordMetrics(ev.RunID, *ev.Metrics)
 	}
+	if ev.Agent != "" {
+		s.recordAgent(ev.RunID, ev.Agent)
+	}
+	if ev.Result != nil && ev.Result.Context != nil {
+		s.recordContext(ev.RunID, ev.Result.Context)
+	}
 	s.captureFailure(ev)
 }
 
@@ -499,6 +521,9 @@ func (s *Server) recordTrace(runID string, sp core.TraceSpan) {
 	if t.Source == "" {
 		t.Source = "internal"
 	}
+	if t.StartedAt.IsZero() {
+		t.StartedAt = sp.StartedAt
+	}
 	t.Spans = append(t.Spans, sp)
 	s.traces[runID] = t
 }
@@ -508,6 +533,25 @@ func (s *Server) recordMetrics(runID string, m core.RunMetrics) {
 	defer s.tracesMu.Unlock()
 	t := s.traces[runID]
 	t.Metrics = &m
+	if t.StartedAt.IsZero() {
+		t.StartedAt = time.Now().Add(-time.Duration(m.DurationMS) * time.Millisecond)
+	}
+	s.traces[runID] = t
+}
+
+func (s *Server) recordAgent(runID, agent string) {
+	s.tracesMu.Lock()
+	defer s.tracesMu.Unlock()
+	t := s.traces[runID]
+	t.Agent = agent
+	s.traces[runID] = t
+}
+
+func (s *Server) recordContext(runID string, c *core.RunContext) {
+	s.tracesMu.Lock()
+	defer s.tracesMu.Unlock()
+	t := s.traces[runID]
+	t.Context = c
 	s.traces[runID] = t
 }
 
@@ -521,7 +565,96 @@ func (s *Server) handleRunTrace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown run "+id)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runId": id, "spans": t.Spans, "metrics": t.Metrics, "source": t.Source})
+	writeJSON(w, http.StatusOK, map[string]any{"runId": id, "spans": t.Spans, "metrics": t.Metrics, "source": t.Source, "agent": t.Agent, "startedAt": t.StartedAt, "context": t.Context})
+}
+
+// handleRuns lists all traced runs, newest first (for the console).
+type runSummary struct {
+	RunID      string    `json:"runId"`
+	Agent      string    `json:"agent,omitempty"`
+	Status     string    `json:"status"`
+	StartedAt  time.Time `json:"startedAt,omitempty"`
+	DurationMS int64     `json:"durationMs,omitempty"`
+	Source     string    `json:"source,omitempty"`
+	SpanCount  int       `json:"spanCount"`
+}
+
+func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
+	s.tracesMu.Lock()
+	runs := make([]runSummary, 0, len(s.traces))
+	for id, t := range s.traces {
+		status := "running"
+		var durationMS int64
+		if t.Metrics != nil {
+			status = t.Metrics.Status
+			durationMS = t.Metrics.DurationMS
+		}
+		runs = append(runs, runSummary{
+			RunID:      id,
+			Agent:      t.Agent,
+			Status:     status,
+			StartedAt:  t.StartedAt,
+			DurationMS: durationMS,
+			Source:     t.Source,
+			SpanCount:  len(t.Spans),
+		})
+	}
+	s.tracesMu.Unlock()
+	sort.Slice(runs, func(i, j int) bool {
+		if runs[i].StartedAt.Equal(runs[j].StartedAt) {
+			return runs[i].RunID < runs[j].RunID
+		}
+		return runs[i].StartedAt.After(runs[j].StartedAt)
+	})
+	if runs == nil {
+		runs = []runSummary{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+}
+
+// handleFailures returns the tail of the failures feed (the production
+// signal behind `ernest eval --learn`), newest first.
+func (s *Server) handleFailures(w http.ResponseWriter, r *http.Request) {
+	if s.failPath == "" {
+		writeError(w, http.StatusNotFound, "no failures feed configured (set \"failures\" in ernest.json)")
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &limit); err != nil || limit < 0 {
+			writeError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	s.failMu.Lock()
+	data, err := os.ReadFile(s.failPath)
+	s.failMu.Unlock()
+	if err != nil {
+		writeError(w, http.StatusNotFound, "failures feed not readable: "+err.Error())
+		return
+	}
+	var records []json.RawMessage
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		records = append(records, json.RawMessage(line))
+	}
+	// Newest first, capped.
+	if len(records) > limit {
+		records = records[len(records)-limit:]
+	}
+	for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
+		records[i], records[j] = records[j], records[i]
+	}
+	if records == nil {
+		records = []json.RawMessage{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"records": records})
 }
 
 // handleAudit returns the newest audit entries (query: limit).

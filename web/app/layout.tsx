@@ -1,9 +1,18 @@
 import type { Metadata } from "next";
+import { Inter } from "next/font/google";
 import "./globals.css";
 
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-inter",
+});
+
 export const metadata: Metadata = {
-  title: "ernest playground",
-  description: "Streaming chat UI for ernest agents (multi-agent framework).",
+  title: "ernest console",
+  description:
+    "Operate, observe and configure ernest agents — runs, traces, context, approvals and evals.",
+  icons: { icon: "/icon.svg" },
 };
 
 export default function RootLayout({
@@ -11,7 +20,7 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body className={inter.variable}>{children}</body>
     </html>
   );
 }

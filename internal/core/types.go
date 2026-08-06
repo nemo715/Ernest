@@ -113,7 +113,20 @@ type RunResult struct {
 	Usage     *Usage     `json:"usage,omitempty"`
 	Error     string     `json:"error,omitempty"`
 	DurationMS int64     `json:"durationMs"`
+	Context   *RunContext `json:"context,omitempty"` // what the model actually saw
 	Metadata  map[string]any `json:"metadata,omitempty"`
+}
+
+// RunContext is the context assembled for a run: the system prompt the
+// model saw (instructions + retrieved knowledge) and how much history
+// was sent. It is persisted in the run trace so a run can be audited
+// exactly ("what did the agent know?") and asserted in evals via
+// expect.contextContains.
+type RunContext struct {
+	SystemPrompt string   `json:"systemPrompt,omitempty"` // instructions + knowledge block
+	Knowledge    []string `json:"knowledge,omitempty"`    // retrieved chunk texts
+	HistorySent  int      `json:"historySent"`            // messages in the request (post-trim)
+	HistoryTotal int      `json:"historyTotal"`           // messages in the session before trim
 }
 
 // Usage tracks token consumption when the provider reports it.

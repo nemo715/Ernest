@@ -9,8 +9,12 @@
 import type {
   AgentInfo,
   ApproveRequest,
+  AuditEntry,
   ChatRequest,
+  FailureRecord,
   RunEvent,
+  RunSummary,
+  RunTrace,
   Session,
   SessionInfo,
   WSClientMessage,
@@ -84,6 +88,22 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getAgents(): Promise<AgentInfo[]> {
   return requestJSON("/api/agents");
+}
+
+export function getRuns(): Promise<{ runs: RunSummary[] }> {
+  return requestJSON("/api/runs");
+}
+
+export function getRunTrace(runId: string): Promise<RunTrace> {
+  return requestJSON(`/api/runs/${encodeURIComponent(runId)}/trace`);
+}
+
+export function getFailures(limit = 50): Promise<{ records: FailureRecord[] }> {
+  return requestJSON(`/api/failures?limit=${limit}`);
+}
+
+export function getAudit(limit = 100): Promise<AuditEntry[]> {
+  return requestJSON(`/api/audit?limit=${limit}`);
 }
 
 export function listSessions(agent?: string): Promise<SessionInfo[]> {
@@ -212,11 +232,6 @@ export async function streamApprove(
 // ---------------------------------------------------------------------------
 // WebSocket transport (GET /ws/chat)
 // ---------------------------------------------------------------------------
-
-/** GET /api/runs/{id}/trace — instrumented spans of a finished run. */
-export async function getRunTrace(runId: string): Promise<unknown[]> {
-  return requestJSON(`/api/runs/${encodeURIComponent(runId)}/trace`);
-}
 
 export type WSStatus = "connecting" | "open" | "closed";
 

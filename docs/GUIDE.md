@@ -159,6 +159,11 @@ ernest.exe playground --config ernest.json --port 9090
 - `--demo` boots a self-contained mock demo with no config at all
 - `--static <dir>` serves a prebuilt UI bundle
 
+The web UI is a full **dev console**, not just a chat window: runs & traces
+(with the exact context the model saw — assembled system prompt, retrieved
+knowledge chunks, history window), sessions, the HITL approvals queue,
+the failures feed and the audit log. See the sidebar in the app.
+
 ## 5. Teams (delegation)
 
 Teams are assembled in Go — `ernest.json` has no team concept. The scaffold
@@ -324,6 +329,30 @@ formatting like `"17 * 23"` still matches `"17*23"`). Judge requires
 `rubric`; `minScore` defaults to 0.7. Tool-argument matches and judge
 scores are reported per scenario, together with tokens and estimated
 cost, so evals double as a cost ledger.
+
+### Context assertions (what the model actually saw)
+
+Every run records the context that was assembled for it: the system
+prompt (instructions + retrieved knowledge chunks) and how much history
+was sent. `contextContains` asserts on that — it catches the failure
+mode where instructions or knowledge silently stop reaching the model:
+
+```json
+{
+  "name": "instructions-reach-the-model",
+  "input": "What are the refund rules?",
+  "expect": {
+    "status": "completed",
+    "contextContains": ["You are a helpful assistant.", "refund policy"]
+  }
+}
+```
+
+Each entry must appear in the assembled system prompt; a run that
+captured no context, or a prompt missing a required substring, fails
+with the reason. You can see the exact assembled prompt per run in the
+console (Runs & traces → a run → Context tab) and via
+`GET /api/runs/{id}/trace` (`context` field).
 
 ```bash
 # run scenarios (exits non-zero on any failure)
@@ -509,10 +538,20 @@ accept, 400 on a malformed payload).
 
 ```bash
 ernest.exe mcp-serve --config ernest.json
+# stdio transport — Claude Desktop, Cursor, any MCP client
+
+ernest.exe mcp-serve --config ernest.json --http :8123
+# streamable HTTP transport (2025-06-18) — curl, remote clients
 ```
 
-Serves every configured agent as a **tool** over MCP (stdio) — Claude Desktop,
-Cursor, or any MCP client can call your agents. `--name` sets the server name.
+Serves every configured agent as a **tool** over MCP. `--name` sets the
+server name. The server advertises tools, resources and prompts:
+`resources/list` is honestly empty (no static resources), and
+`prompts/list` exposes a `chat` template (input required, optional
+agent override) that expands to a user message — handy for MCP hosts
+that surface prompts to users. Clients can read the same surface: the
+Go API (and the Python SDK's HTTP client) can list tools, call them,
+list resources, read resources, list prompts and fetch a prompt.
 
 ## 12. Production checklist
 
@@ -535,7 +574,10 @@ Cursor, or any MCP client can call your agents. `--name` sets the server name.
 | `POST /api/chat` | Streaming chat (SSE) |
 | `POST /api/approve` | Approve/deny a pending tool call |
 | `GET /api/sessions`, `GET/DELETE /api/sessions/{id}` | Session store |
-| `GET /api/runs/{id}/trace` | Per-run trace |
+| `GET /api/runs` | Run summary list (newest first) |
+| `GET /api/runs/{id}/trace` | Per-run trace (spans, metrics, context) |
+| `POST /api/traces` | Ingest a trace from any framework (202) |
+| `GET /api/failures?limit=N` | Failure feed (JSONL tail, max 200) |
 | `GET /api/audit` | Audit log |
 | `GET /ws/chat` | WebSocket chat |
 | `GET /.well-known/agent.json` | A2A discovery document |

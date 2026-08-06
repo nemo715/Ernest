@@ -36,6 +36,7 @@ type runner struct {
 	iterations int
 	callCounts map[string]int // identical tool-call signature -> count (runaway detection)
 	spans   []core.TraceSpan // closed spans, in order (trace.span events)
+	lastContext *core.RunContext // context of the most recent provider request
 }
 
 func newRunner(a *Agent, opt RunOptions) (*runner, error) {
@@ -515,8 +516,10 @@ func (r *runner) providerOnce(ctx context.Context, req llm.ChatRequest) (string,
 // knowledge context).
 func (r *runner) buildRequest(ctx context.Context) (llm.ChatRequest, error) {
 	messages := []core.Message{}
+	var kchunks []string
+	system := ""
 	if r.agent.Instructions != "" || r.agent.Knowledge != nil {
-		system := r.agent.Instructions
+		system = r.agent.Instructions
 		if r.agent.Knowledge != nil {
 			// Retrieve the most relevant knowledge chunks for the last
 			// user message.
@@ -533,6 +536,7 @@ func (r *runner) buildRequest(ctx context.Context) (llm.ChatRequest, error) {
 					var sb strings.Builder
 					sb.WriteString("\n\nKnowledge base:\n")
 					for _, c := range chunks {
+						kchunks = append(kchunks, c.Text)
 						sb.WriteString("- " + c.Text + "\n")
 					}
 					system += sb.String()
@@ -566,6 +570,14 @@ func (r *runner) buildRequest(ctx context.Context) (llm.ChatRequest, error) {
 	}
 	if len(req.Stop) == 0 {
 		req.Stop = r.agent.Stop
+	}
+	// Record what the model actually saw, so the run trace and eval
+	// contextContains assertions can audit it.
+	r.lastContext = &core.RunContext{
+		SystemPrompt: system,
+		Knowledge:    kchunks,
+		HistorySent:  len(history),
+		HistoryTotal: len(r.session.Messages),
 	}
 	return req, nil
 }
@@ -648,6 +660,7 @@ func (r *runner) buildResult(status core.RunStatus, out string, err error) *core
 		Approvals: r.session.PendingApprovals,
 		Usage:     r.usage,
 		DurationMS: time.Since(r.started).Milliseconds(),
+		Context:   r.lastContext,
 		Metadata: map[string]any{
 			"agent":      r.agent.Name,
 			"iterations": r.iterations,

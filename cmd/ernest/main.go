@@ -1142,6 +1142,7 @@ func cmdMCPServe(args []string) error {
 	fs := flag.NewFlagSet("mcp-serve", flag.ExitOnError)
 	cfgPath := fs.String("config", config.DefaultFile, "path to ernest.json")
 	name := fs.String("name", "ernest", "server name reported to clients")
+	httpAddr := fs.String("http", "", "serve over streamable HTTP on this address (e.g. :8123) instead of stdio")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1157,6 +1158,15 @@ func cmdMCPServe(args []string) error {
 	defer rt.Close()
 
 	srv := mcp.NewServer(rt.Agents, mcp.ServerOptions{Name: *name, Version: version})
+	if *httpAddr != "" {
+		fmt.Fprintln(os.Stderr, "ernest mcp-serve: streamable HTTP on", *httpAddr, "— agents as tools:", agentNames(rt.Agents))
+		httpSrv := &http.Server{
+			Addr:              *httpAddr,
+			Handler:           srv,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		return httpSrv.ListenAndServe()
+	}
 	fmt.Fprintln(os.Stderr, "ernest mcp-serve: agents as tools:", agentNames(rt.Agents))
 	return srv.ServeStdio(context.Background(), os.Stdin, os.Stdout)
 }

@@ -19,9 +19,10 @@ live progress instead of waiting for a final answer.
 | **Guardrails** | Token & cost caps, deny-lists, always-require-approval tools, input redaction |
 | **Memory & storage** | Session store (in-memory or SQLite), agent memory, knowledge base |
 | **Streaming** | SSE (`/api/chat`) + WebSocket (`/ws/chat`) with interrupt/steer |
-| **Tracing & audit** | Per-run trace endpoint + `POST /api/traces` ingestion from any framework, full audit log |
-| **Interop** | MCP client (stdio/http) & server mode, A2A server with agent cards |
-| **Eval** | Scenario runner (`ernest eval`) with judge, baseline gates, tool-result shape checks; `--learn` grows the suite from production failures; `replay --endpoint` runs it nightly against a live server with drift alerts |
+| **Tracing & audit** | Per-run trace endpoint + `POST /api/traces` ingestion from any framework, full audit log; traces carry the exact context the model saw (system prompt + knowledge + history window) |
+| **Interop** | MCP client (stdio/http) & server mode (`mcp-serve` stdio or streamable HTTP), A2A server with agent cards |
+| **Eval** | Scenario runner (`ernest eval`) with judge, baseline gates, tool-result shape checks, `contextContains` context assertions; `--learn` grows the suite from production failures; `replay --endpoint` runs it nightly against a live server with drift alerts |
+| **Dev console** | Next.js console served by the runtime: runs & traces (waterfall + context panel), sessions, HITL approvals queue, failures feed, audit log |
 | **CLI** | `init`, `new`, `run`, `playground`, `doctor`, `eval`, `replay`, `mcp-serve` |
 | **SDKs** | Python (sync + async), examples in Go; Next.js playground UI |
 
@@ -157,7 +158,7 @@ RAG pipelines.
 ## Status & honest limitations
 
 - Public Go API: `agent`, `core`, `llm`, `team`, `workflow`, `server`,
-  `storage` (module `github.com/nemo715/Ernest`, tagged `v0.1.1`).
+  `storage` (module `github.com/nemo715/Ernest`, tagged `v0.1.7`).
   `ernest init` / `ernest new <agent|team|workflow|server>` scaffold
   standalone compilable projects.
 - `examples/`, `bench/` and `eval-demo/` import `ernest/internal/*` and

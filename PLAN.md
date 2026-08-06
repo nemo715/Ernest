@@ -36,15 +36,19 @@ web/scripts/           dev tools: mock backend, static file server
 | agent runner (chat/stream/tools/memory/knowledge/HITL) | done | done |
 | guardrails (input/output/depth/time) | done | done |
 | tracing (trace.span / run.metrics / /api/runs/{id}/trace) | done | done |
+| context engineering (run context: system prompt + knowledge + history; `contextContains` evals; /api/runs list) | done (v0.1.7) | done |
+| failures feed (`failures.jsonl` + /api/failures + console page) | done (v0.1.7) | done |
 | storage (mem/sqlite/postgres) + vector + knowledge | done | done |
 | workflow + team | done | done |
 | mcp (http + stdio) | done | done |
+| mcp completeness (client resources/prompts; server streamable-HTTP `--http`) | done (v0.1.7) | done |
 | a2a (agent cards + JSON-RPC + client tool) | done | done |
 | browser tool (rod/Edge) | done | done |
 | eval harness (`ernest eval`) | done | done |
 | CLI (init/run/playground/doctor/new/eval/mcp-serve) | done | CLI flows E2E |
 | HTTP/SSE server + /ws/chat transport | done | done (ws tests) |
 | web UI (streaming + HITL + ws transport + interrupt/steer) | done | build-verified |
+| dev console (runs/traces/context, sessions, approvals, failures, audit; bulbul logo; SPA fallback) | done (v0.1.7) | build-verified |
 | Python SDK (sync + async, trace fetch) | done | done (59 pytest) |
 | examples (Go + Python SDK) | done | python examples E2E-verified |
 

@@ -38,6 +38,11 @@ type Expectation struct {
 	ToolResults    []ToolResultExpectation `json:"toolResults,omitempty"`
 	NoToolCalls    bool                    `json:"noToolCalls,omitempty"`
 	Status         string                  `json:"status,omitempty"` // completed | awaiting_approval | failed
+	// ContextContains asserts the assembled system prompt (instructions
+	// + retrieved knowledge) that the run actually sent to the model.
+	// This is the context-engineering guard: it catches runs where the
+	// right knowledge never made it into the prompt.
+	ContextContains []string `json:"contextContains,omitempty"`
 }
 
 // JudgeConfig attaches an LLM-as-judge check to a scenario: a second
@@ -70,6 +75,7 @@ type Result struct {
 	TokensOut  int     `json:"tokensOut,omitempty"`
 	CostCents  float64 `json:"costCents,omitempty"`
 	ToolCalls  int     `json:"toolCalls"`
+	Context    *core.RunContext `json:"context,omitempty"` // assembled system prompt + knowledge
 	// Judge scoring, when the scenario has a judge configured.
 	JudgeScore   float64 `json:"judgeScore,omitempty"`
 	JudgeVerdict string  `json:"judgeVerdict,omitempty"` // pass | fail
@@ -116,6 +122,7 @@ type Outcome struct {
 	Usage       *core.Usage
 	CostCents   float64
 	DurationMS  int64
+	Context     *core.RunContext // assembled context, when the run reports it
 }
 
 // AgentRunner runs scenarios in-process against an agent.
@@ -158,6 +165,7 @@ func (r AgentRunner) RunScenario(ctx context.Context, input string) (*Outcome, e
 	o.Status = string(res.Status)
 	o.Error = res.Error
 	o.Usage = res.Usage
+	o.Context = res.Context
 	o.DurationMS = time.Since(start).Milliseconds()
 	if o.DurationMS == 0 {
 		o.DurationMS = res.DurationMS
@@ -191,6 +199,7 @@ func Run(ctx context.Context, r Runner, sc Scenario) (*Result, error) {
 		res.TokensOut = outcome.Usage.OutputTokens
 	}
 	res.CostCents = outcome.CostCents
+	res.Context = outcome.Context
 	fail := func(format string, args ...any) {
 		res.Failures = append(res.Failures, fmt.Sprintf(format, args...))
 	}
@@ -204,6 +213,17 @@ func Run(ctx context.Context, r Runner, sc Scenario) (*Result, error) {
 	for _, want := range sc.Expect.OutputContains {
 		if !strings.Contains(res.Output, want) {
 			fail("output %q does not contain %q", res.Output, want)
+		}
+	}
+	if len(sc.Expect.ContextContains) > 0 {
+		if outcome.Context == nil || outcome.Context.SystemPrompt == "" {
+			fail("contextContains: no context was captured for this run")
+		} else {
+			for _, want := range sc.Expect.ContextContains {
+				if !strings.Contains(outcome.Context.SystemPrompt, want) {
+					fail("context does not contain %q (instructions/knowledge never reached the model)", want)
+				}
+			}
 		}
 	}
 	if sc.Expect.NoToolCalls && len(outcome.ToolCalls) > 0 {

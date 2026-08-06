@@ -13,7 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/nemo715/Ernest/internal/agent"
 	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/llm"
 )
 
 // ---------------------------------------------------------------------------
@@ -347,6 +349,235 @@ func newStdioTestClient(t *testing.T) *Client {
 // ---------------------------------------------------------------------------
 // stdio client tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// client resources + prompts
+// ---------------------------------------------------------------------------
+
+func TestClientResourcesAndPrompts(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     any            `json:"id"`
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		switch req.Method {
+		case "initialize":
+			writeJSON(w, rpcOut(req.ID, map[string]any{"protocolVersion": ProtocolVersion, "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "fake", "version": "1"}}))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "resources/list":
+			writeJSON(w, rpcOut(req.ID, map[string]any{"resources": []Resource{{
+				URI: "docs://policy", Name: "Policy", Description: "Vendor policy", MimeType: "text/markdown",
+			}}}))
+		case "resources/read":
+			writeJSON(w, rpcOut(req.ID, map[string]any{"contents": []ResourceContent{{
+				URI: "docs://policy", MimeType: "text/markdown", Text: "Only Acme is approved.",
+			}}}))
+		case "prompts/list":
+			writeJSON(w, rpcOut(req.ID, map[string]any{"prompts": []Prompt{{
+				Name: "triage", Description: "Triage an issue",
+				Arguments: []PromptArgument{{Name: "issue", Required: true}},
+			}}}))
+		case "prompts/get":
+			writeJSON(w, rpcOut(req.ID, map[string]any{"messages": []PromptMessage{{
+				Role: "user", Content: PromptContent{Type: "text", Text: "triage: crash on boot"},
+			}}}))
+		default:
+			writeJSON(w, rpcErrOut(req.ID, -32601, "method not found "+req.Method))
+		}
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c, err := NewHTTP(ts.URL, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	res, err := c.Resources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].URI != "docs://policy" {
+		t.Fatalf("resources = %+v", res)
+	}
+
+	contents, err := c.ReadResource(context.Background(), "docs://policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) != 1 || !strings.Contains(contents[0].Text, "Acme") {
+		t.Fatalf("contents = %+v", contents)
+	}
+
+	prompts, err := c.Prompts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 1 || prompts[0].Name != "triage" {
+		t.Fatalf("prompts = %+v", prompts)
+	}
+
+	pr, err := c.GetPrompt(context.Background(), "triage", map[string]string{"issue": "crash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pr.Messages) != 1 || pr.Messages[0].Role != "user" {
+		t.Fatalf("prompt result = %+v", pr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// server streamable-HTTP transport (2025-06-18)
+// ---------------------------------------------------------------------------
+
+func rpcPost(t *testing.T, url string, accept string, payload string) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", accept)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp, string(body)
+}
+
+func TestMCPHTTPServerTransport(t *testing.T) {
+	p := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
+		{Content: "pong", FinishReason: "stop"},
+		{Content: "pong", FinishReason: "stop"},
+		{Content: "pong", FinishReason: "stop"},
+	}})
+	a := agent.New("echo", p)
+	srv := NewServer([]*agent.Agent{a}, ServerOptions{Name: "ernest-test", Version: "1.2.3"})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// initialize (JSON response)
+	resp, body := rpcPost(t, ts.URL, "application/json", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("initialize: status=%d type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if !strings.Contains(body, `"name":"ernest-test"`) || !strings.Contains(body, `"version":"1.2.3"`) {
+		t.Fatalf("initialize body = %s", body)
+	}
+
+	// initialize over SSE accept -> text/event-stream with a message event
+	resp, body = rpcPost(t, ts.URL, "text/event-stream", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("sse init: status=%d type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if !strings.Contains(body, "event: message") || !strings.Contains(body, "data: ") {
+		t.Fatalf("sse body = %q", body)
+	}
+
+	// notification -> 202, no body
+	resp, body = rpcPost(t, ts.URL, "application/json", `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	if resp.StatusCode != http.StatusAccepted || body != "" {
+		t.Fatalf("notification: status=%d body=%q", resp.StatusCode, body)
+	}
+
+	// tools/list -> one agent tool
+	_, body = rpcPost(t, ts.URL, "application/json", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	if !strings.Contains(body, `"name":"echo"`) {
+		t.Fatalf("tools/list body = %s", body)
+	}
+
+	// prompts/list + prompts/get
+	_, body = rpcPost(t, ts.URL, "application/json", `{"jsonrpc":"2.0","id":3,"method":"prompts/list"}`)
+	if !strings.Contains(body, `"name":"chat"`) {
+		t.Fatalf("prompts/list body = %s", body)
+	}
+	_, body = rpcPost(t, ts.URL, "application/json", `{"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"chat","arguments":{"input":"hello"}}}`)
+	if !strings.Contains(body, `"role":"user"`) || !strings.Contains(body, "hello") {
+		t.Fatalf("prompts/get body = %s", body)
+	}
+
+	// resources/list -> empty; resources/read -> JSON-RPC error
+	_, body = rpcPost(t, ts.URL, "application/json", `{"jsonrpc":"2.0","id":5,"method":"resources/list"}`)
+	if !strings.Contains(body, `"resources":[]`) {
+		t.Fatalf("resources/list body = %s", body)
+	}
+	_, body = rpcPost(t, ts.URL, "application/json", `{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"docs://x"}}`)
+	if !strings.Contains(body, `"error"`) {
+		t.Fatalf("resources/read body = %s", body)
+	}
+
+	// tools/call runs the agent
+	_, body = rpcPost(t, ts.URL, "application/json", `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"echo","arguments":{"input":"hi"}}}`)
+	if !strings.Contains(body, "pong") {
+		t.Fatalf("tools/call body = %s", body)
+	}
+
+	// GET / -> SSE stream kept open
+	getResp, err := http.Get(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(getResp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("GET content-type = %q", getResp.Header.Get("Content-Type"))
+	}
+	getResp.Body.Close()
+
+	// OPTIONS -> CORS preflight
+	optReq, _ := http.NewRequest(http.MethodOptions, ts.URL, nil)
+	optResp, err := http.DefaultClient.Do(optReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	optResp.Body.Close()
+	if optResp.StatusCode != http.StatusNoContent || optResp.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("options: status=%d cors=%q", optResp.StatusCode, optResp.Header.Get("Access-Control-Allow-Origin"))
+	}
+
+	// Go client round trip against the real HTTP server
+	c, err := NewHTTP(ts.URL, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	tools, err := c.ListTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 || tools[0].Name != "echo" {
+		t.Fatalf("client tools = %+v", tools)
+	}
+	out, err := c.Call(context.Background(), "echo", map[string]any{"input": "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Text(), "pong") {
+		t.Fatalf("client call = %+v", out)
+	}
+	pr, err := c.GetPrompt(context.Background(), "chat", map[string]string{"input": "hello", "agent": "echo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pr.Messages) != 1 || !strings.Contains(pr.Messages[0].Content.Text, "hello") {
+		t.Fatalf("client prompt = %+v", pr)
+	}
+	resList, err := c.Resources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resList) != 0 {
+		t.Fatalf("client resources = %+v", resList)
+	}
+}
 
 func TestStdioFullFlow(t *testing.T) {
 	c := newStdioTestClient(t)

@@ -217,8 +217,12 @@ func (s *Server) handleMessage(ctx context.Context, payload []byte) (any, error)
 		}
 		result := map[string]any{
 			"protocolVersion": version,
-			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]any{"name": s.name, "version": s.version},
+			"capabilities": map[string]any{
+				"tools":     map[string]any{"listChanged": false},
+				"resources": map[string]any{},
+				"prompts":   map[string]any{},
+			},
+			"serverInfo": map[string]any{"name": s.name, "version": s.version},
 		}
 		return rpcServerResult(msg.ID, result), nil
 	case "notifications/initialized", "notifications/cancelled", "notifications/tools/list_changed":
@@ -229,8 +233,20 @@ func (s *Server) handleMessage(ctx context.Context, payload []byte) (any, error)
 		return rpcServerResult(msg.ID, map[string]any{"tools": s.ToolList()}), nil
 	case "tools/call":
 		return s.handleToolCall(ctx, msg.ID, msg.Params)
-	case "resources/list", "resources/read", "prompts/list", "prompts/get":
-		return rpcServerError(msg.ID, -32601, "method not supported: "+msg.Method), nil
+	case "resources/list":
+		// ernest serves no static resources today; agents and their
+		// knowledge are reachable through tools (and prompts).
+		return rpcServerResult(msg.ID, map[string]any{"resources": []any{}}), nil
+	case "resources/read":
+		var params struct {
+			URI string `json:"uri"`
+		}
+		_ = json.Unmarshal(msg.Params, &params)
+		return rpcServerError(msg.ID, -32602, "resource not found: "+params.URI), nil
+	case "prompts/list":
+		return rpcServerResult(msg.ID, map[string]any{"prompts": s.PromptList()}), nil
+	case "prompts/get":
+		return s.handlePromptGet(msg.ID, msg.Params)
 	default:
 		return rpcServerError(msg.ID, -32601, "method not found: "+msg.Method), nil
 	}
@@ -267,10 +283,55 @@ func (s *Server) handleToolCall(ctx context.Context, id json.RawMessage, params 
 		isError = res.Status != "completed"
 	}
 	result := map[string]any{
-		"content": []map[string]any{{"type": "text", "text": text}},
+		"content": []map[string]any{{ "type": "text", "text": text }},
 		"isError": isError,
 	}
 	return rpcServerResult(id, result), nil
+}
+
+// PromptList returns the MCP prompt templates the server exposes. One
+// "chat" prompt mirrors the agent tools: it expands to a single user
+// message, so any MCP host can drive the agents through prompts too.
+func (s *Server) PromptList() []map[string]any {
+	agents := make([]string, 0, len(s.agents))
+	for _, a := range s.agents {
+		agents = append(agents, a.Name)
+	}
+	return []map[string]any{{
+		"name":        "chat",
+		"description": "Send one message to an ernest agent (agents: " + strings.Join(agents, ", ") + ").",
+		"arguments": []map[string]any{
+			{"name": "input", "description": "The message to send to the agent.", "required": true},
+			{"name": "agent", "description": "Agent to address (default: first agent).", "required": false},
+		},
+	}}
+}
+
+func (s *Server) handlePromptGet(id json.RawMessage, params json.RawMessage) (any, error) {
+	var call struct {
+		Name      string            `json:"name"`
+		Arguments map[string]string `json:"arguments"`
+	}
+	if err := json.Unmarshal(params, &call); err != nil {
+		return rpcServerError(id, -32602, "invalid params: "+err.Error()), nil
+	}
+	if call.Name != "chat" {
+		return rpcServerError(id, -32602, "unknown prompt "+call.Name+" (prompts: chat)"), nil
+	}
+	input := call.Arguments["input"]
+	if input == "" {
+		return rpcServerError(id, -32602, "prompt chat requires a non-empty \"input\" argument"), nil
+	}
+	text := input
+	if agent := call.Arguments["agent"]; agent != "" {
+		text = "(ernest agent " + agent + ") " + text
+	}
+	return rpcServerResult(id, map[string]any{
+		"messages": []map[string]any{{
+			"role":    "user",
+			"content": map[string]any{"type": "text", "text": text},
+		}},
+	}), nil
 }
 
 // ---------------------------------------------------------------------------

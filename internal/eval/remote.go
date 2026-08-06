@@ -116,6 +116,7 @@ func (r HTTPRunner) RunScenario(ctx context.Context, input string) (*Outcome, er
 		o.Error = runErr
 	}
 	o.Usage = res.Usage
+	o.Context = res.Context
 	o.DurationMS = time.Since(start).Milliseconds()
 	if o.DurationMS == 0 {
 		o.DurationMS = res.DurationMS

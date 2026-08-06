@@ -11,7 +11,9 @@ import (
 
 	"github.com/nemo715/Ernest/internal/agent"
 	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/knowledge"
 	"github.com/nemo715/Ernest/internal/llm"
+	"github.com/nemo715/Ernest/internal/vector"
 )
 
 func testAgent(t *testing.T) *agent.Agent {
@@ -64,6 +66,85 @@ func TestEvalFailOutput(t *testing.T) {
 	}
 	if len(res.Failures) != 2 {
 		t.Fatalf("failures = %v", res.Failures)
+	}
+}
+
+func TestEvalContextContains(t *testing.T) {
+	// Instructions land in the assembled context.
+	p := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{{Content: "ok", FinishReason: "stop"}}})
+	a := agent.New("ctx", p)
+	a.Instructions = "You are the finance agent. Trust only approved vendors from the vendor list."
+	res, err := Run(context.Background(), AgentRunner{Agent: a}, Scenario{
+		Name:  "context",
+		Input: "which vendors can I use?",
+		Expect: Expectation{
+			ContextContains: []string{"approved vendors"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Pass {
+		t.Fatalf("expected pass: %+v", res)
+	}
+	if res.Context == nil {
+		t.Fatal("outcome should carry the assembled context")
+	}
+
+	// Retrieval: knowledge chunks must be part of the context.
+	kp := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
+		{Content: "ok", FinishReason: "stop"},
+		{},
+	}})
+	kb := knowledge.New(vector.NewInMemoryStore(), kp, knowledge.ChunkOptions{})
+	if _, err := kb.AddText(context.Background(), "The vendor policy states that only Acme is approved.", nil); err != nil {
+		t.Fatal(err)
+	}
+	ka := agent.New("know-ctx", kp)
+	ka.Knowledge = kb
+	res, err = Run(context.Background(), AgentRunner{Agent: ka}, Scenario{
+		Name:  "context-knowledge",
+		Input: "who is approved?",
+		Expect: Expectation{
+			ContextContains: []string{"Knowledge base", "Acme"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Pass {
+		t.Fatalf("expected pass: %+v", res)
+	}
+
+	// A fact that never reached the prompt must fail the assertion.
+	res, err = Run(context.Background(), AgentRunner{Agent: ka}, Scenario{
+		Name:  "context-negative",
+		Input: "who is approved?",
+		Expect: Expectation{
+			ContextContains: []string{"never injected fact"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Pass {
+		t.Fatalf("expected failure: %+v", res)
+	}
+
+	// An agent with no instructions/knowledge reports no context.
+	bare := agent.New("bare", llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{{Content: "hi", FinishReason: "stop"}}}))
+	res, err = Run(context.Background(), AgentRunner{Agent: bare}, Scenario{
+		Name:  "context-bare",
+		Input: "hi",
+		Expect: Expectation{
+			ContextContains: []string{"anything"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Pass || len(res.Failures) != 1 {
+		t.Fatalf("expected one failure: %+v", res)
 	}
 }
 

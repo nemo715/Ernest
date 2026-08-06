@@ -108,7 +108,18 @@ export interface RunResult {
   usage?: Usage;
   error?: string;
   durationMs: number;
+  context?: RunContext;
   metadata?: Record<string, unknown>;
+}
+
+/** What the model actually saw for a run: assembled system prompt,
+ * retrieved knowledge chunks and how much history was sent. Persisted
+ * in the run trace; asserted in evals via expect.contextContains. */
+export interface RunContext {
+  systemPrompt?: string;
+  knowledge?: string[];
+  historySent: number;
+  historyTotal: number;
 }
 
 export interface RunEvent {
@@ -203,4 +214,68 @@ export interface Session {
   toolCache?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// dev console (runs, traces, failures feed, audit)
+// ---------------------------------------------------------------------------
+
+export interface RunSummary {
+  runId: string;
+  agent?: string;
+  status: string; // completed | failed | interrupted | awaiting_approval | running
+  startedAt?: string;
+  durationMs?: number;
+  source?: string; // internal | ingested
+  spanCount: number;
+}
+
+export interface RunTrace {
+  runId: string;
+  spans: TraceSpan[];
+  metrics?: RunMetrics;
+  source?: string;
+  agent?: string;
+  startedAt?: string;
+  context?: RunContext;
+}
+
+export interface FailureRecord {
+  runId?: string;
+  agent?: string;
+  input: string;
+  output?: string;
+  status?: string;
+  error?: string;
+  toolCalls: ToolCall[];
+  toolResults: ToolResult[];
+  at: string;
+}
+
+export interface AuditEntry {
+  id: string;
+  time: string;
+  kind: string; // tool.call | approval.decided | run.complete | run.failed | run.interrupted
+  agent: string;
+  runId?: string;
+  detail?: unknown;
+}
+
+export interface ScenarioExpectation {
+  status?: string;
+  outputContains?: string[];
+  contextContains?: string[];
+  toolCalls?: { name: string; argsContains?: Record<string, unknown> }[];
+  toolResults?: {
+    name: string;
+    errorContains?: string;
+    shape?: { requiredFields?: string[] };
+  }[];
+}
+
+export interface Scenario {
+  name: string;
+  input: string;
+  expect: ScenarioExpectation;
+  judge?: { rubric: string; minScore?: number; model?: string };
 }
