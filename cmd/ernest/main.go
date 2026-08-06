@@ -30,7 +30,7 @@ import (
 	"github.com/nemo715/Ernest/internal/storage"
 )
 
-const version = "0.1.5"
+const version = "0.1.6"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -149,7 +149,7 @@ func main() {
 // scaffoldMod is the go.mod written by init and every `ernest new`
 // template: the project is its own module and imports ernest from the
 // published module path, so scaffolds compile outside the ernest repo.
-const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.5\n"
+const scaffoldMod = "module myapp\n\ngo 1.26.5\n\nrequire github.com/nemo715/Ernest v0.1.6\n"
 
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
@@ -944,8 +944,13 @@ func appendGeneratedScenarios(scenariosPath string, scs []eval.Scenario) error {
 	return os.WriteFile(out, data, 0o644)
 }
 
-// generatedPath is where learned scenarios live: next to the suite.
+// generatedPath is where learned scenarios live: inside the scenarios
+// directory when the suite is a directory (so the same run's
+// LoadScenarios picks it up), or next to a single scenario file.
 func generatedPath(scenariosPath string) string {
+	if info, err := os.Stat(scenariosPath); err == nil && info.IsDir() {
+		return filepath.Join(scenariosPath, "generated.json")
+	}
 	dir := filepath.Dir(scenariosPath)
 	return filepath.Join(dir, "generated.json")
 }

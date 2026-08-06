@@ -72,6 +72,7 @@ func (r HTTPRunner) RunScenario(ctx context.Context, input string) (*Outcome, er
 	var o Outcome
 	var res *core.RunResult
 	var metrics *core.RunMetrics
+	runErr := ""
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
@@ -93,17 +94,27 @@ func (r HTTPRunner) RunScenario(ctx context.Context, input string) (*Outcome, er
 		case ev.Result != nil:
 			res = ev.Result
 		case ev.Type == core.EventRunError:
-			return nil, fmt.Errorf("run failed remotely: %s", truncate(ev.Error, 300))
+			// A failed run is drift to report, not an abort: remember the
+			// error, let the following result event (status failed) become
+			// a failed outcome, and fail via the assertions below.
+			runErr = ev.Error
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("read events: %w", err)
 	}
 	if res == nil {
+		if runErr != "" {
+			return nil, fmt.Errorf("run failed remotely: %s", truncate(runErr, 300))
+		}
 		return nil, fmt.Errorf("endpoint streamed no result event")
 	}
 	o.Output = res.Output
 	o.Status = string(res.Status)
+	o.Error = res.Error
+	if o.Error == "" && runErr != "" {
+		o.Error = runErr
+	}
 	o.Usage = res.Usage
 	o.DurationMS = time.Since(start).Milliseconds()
 	if o.DurationMS == 0 {

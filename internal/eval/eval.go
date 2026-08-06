@@ -110,6 +110,7 @@ type Runner interface {
 type Outcome struct {
 	Output      string
 	Status      string
+	Error       string // run-level error (e.g. runaway loop); reported as a failure
 	ToolCalls   []core.ToolCall
 	ToolResults []core.ToolResult
 	Usage       *core.Usage
@@ -155,6 +156,7 @@ func (r AgentRunner) RunScenario(ctx context.Context, input string) (*Outcome, e
 	}
 	o.Output = res.Output
 	o.Status = string(res.Status)
+	o.Error = res.Error
 	o.Usage = res.Usage
 	o.DurationMS = time.Since(start).Milliseconds()
 	if o.DurationMS == 0 {
@@ -195,6 +197,9 @@ func Run(ctx context.Context, r Runner, sc Scenario) (*Result, error) {
 
 	if sc.Expect.Status != "" && res.Status != sc.Expect.Status {
 		fail("status = %s, want %s", res.Status, sc.Expect.Status)
+	}
+	if outcome.Error != "" {
+		fail("run error: %s", outcome.Error)
 	}
 	for _, want := range sc.Expect.OutputContains {
 		if !strings.Contains(res.Output, want) {
