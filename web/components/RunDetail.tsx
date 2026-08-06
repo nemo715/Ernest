@@ -35,7 +35,15 @@ const KIND_TONE: Record<string, string> = {
 
 export default function RunDetailPage() {
   const params = useParams<{ id: string }>();
-  const runId = params.id;
+  // Static export: deep links (/runs/<id>) are served via the "_"
+  // catchall page, whose params can't carry the real id — read it from
+  // the URL path instead (client navigation passes params as usual).
+  const [runId, setRunId] = useState<string>(params.id);
+
+  useEffect(() => {
+    const seg = window.location.pathname.split("/").filter(Boolean).pop();
+    setRunId(seg && seg !== "_" ? seg : params.id);
+  }, [params.id]);
 
   const [trace, setTrace] = useState<RunTrace | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +51,8 @@ export default function RunDetailPage() {
   const [open, setOpen] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!runId || runId === "_") return; // placeholder id: wait for the real one
+    setError(null);
     getRunTrace(runId)
       .then(setTrace)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));

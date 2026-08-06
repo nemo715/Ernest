@@ -23,13 +23,22 @@ import { fmtClock, shortID } from "@/lib/format";
 
 export default function SessionDetailPage() {
   const params = useParams<{ id: string }>();
-  const sessionId = params.id;
+  // Static export: deep links (/sessions/<id>) are served via the "_"
+  // catchall page — read the real id from the URL path when needed.
+  const [sessionId, setSessionId] = useState<string>(params.id);
+
+  useEffect(() => {
+    const seg = window.location.pathname.split("/").filter(Boolean).pop();
+    setSessionId(seg && seg !== "_" ? seg : params.id);
+  }, [params.id]);
 
   const [session, setSession] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   const reload = () => {
+    if (!sessionId || sessionId === "_") return; // placeholder id: wait for the real one
+    setError(null);
     getSession(sessionId)
       .then(setSession)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));

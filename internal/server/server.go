@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -178,12 +179,28 @@ func (s *Server) routes() {
 	if s.static != "" {
 		fs := http.FileServer(http.Dir(s.static))
 		s.mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// SPA fallback for the dev console: dynamic routes like
-			// /runs/<id> have no file on disk. Extensionless paths that
-			// don't exist as files render index.html; the client-side
-			// router resolves the route and fetches the data.
-			if base := path.Base(r.URL.Path); base != "." && !strings.Contains(base, ".") {
-				r.URL.Path = "/"
+			// SPA fallback for the dev console, existence-aware:
+			//   1. real exported pages (/runs/, /agents/, …) serve as-is;
+			//   2. dynamic-route deep links (/runs/<id>) map to the
+			//      static-export catchall page (<dir>/_/index.html) — the
+			//      client reads the real id from the URL path;
+			//   3. anything else falls back to the overview (index.html).
+			p := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+			base := path.Base(p)
+			first, _, _ := strings.Cut(p, "/")
+			if p != "" && base != "." && !strings.Contains(base, ".") &&
+				!strings.HasPrefix(first, "_") { // _next assets etc.
+				if _, err := os.Stat(filepath.Join(s.static, filepath.FromSlash(p), "index.html")); err != nil {
+					if d := path.Dir(p); d != "." {
+						if _, err := os.Stat(filepath.Join(s.static, filepath.FromSlash(d), "_", "index.html")); err == nil {
+							r.URL.Path = "/" + d + "/_/"
+						} else {
+							r.URL.Path = "/"
+						}
+					} else {
+						r.URL.Path = "/"
+					}
+				}
 			}
 			fs.ServeHTTP(w, r)
 		}))

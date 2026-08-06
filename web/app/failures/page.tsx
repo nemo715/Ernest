@@ -84,7 +84,7 @@ export default function FailuresPage() {
                   </Link>
                 )}
                 <span className="faint small">
-                  {f.toolCalls.length} tool call{f.toolCalls.length === 1 ? "" : "s"}
+                  {(f.toolCalls ?? []).length} tool call{(f.toolCalls ?? []).length === 1 ? "" : "s"}
                   {f.error ? " · run failed" : ""}
                 </span>
               </div>
@@ -93,14 +93,14 @@ export default function FailuresPage() {
                   {f.error.length > 260 ? `${f.error.slice(0, 260)}…` : f.error}
                 </div>
               )}
-              {f.toolCalls.length > 0 && (
+              {(f.toolCalls ?? []).length > 0 && (
                 <div className="row wrap" style={{ marginBottom: 6 }}>
-                  {f.toolCalls.map((tc, j) => (
+                  {(f.toolCalls ?? []).map((tc, j) => (
                     <Badge key={j} tone="warn">↳ {tc.name}</Badge>
                   ))}
                 </div>
               )}
-              {f.toolResults.length > 0 && (
+              {(f.toolResults ?? []).length > 0 && (
                 <button
                   className="btn btn-ghost btn-sm"
                   onClick={() => setOpen(open === i ? null : i)}
@@ -111,7 +111,7 @@ export default function FailuresPage() {
               )}
               {open === i && (
                 <div style={{ marginTop: 8 }}>
-                  <CodeBlock value={f.toolResults} />
+                  <CodeBlock value={f.toolResults ?? []} />
                 </div>
               )}
             </div>
