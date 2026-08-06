@@ -32,6 +32,7 @@ web/out/
 web/.env*
 web/tsconfig.tsbuildinfo
 web/e2e-*.png
+web/S*-*.png
 web/*.tsbuildinfo
 
 # Scratch
