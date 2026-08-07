@@ -61,6 +61,24 @@
         "rubric": "The answer must say the visualization is buggy: |0> is the north pole and the arrow must have full length pointing up.",
         "minScore": 0.7
       }
+    },
+    {
+      "name": "analyst-decides-mitigation",
+      "input": "Execution report from a real run of a Bell-state experiment: ideal counts {'00': 2009, '11': 2087}; noisy counts {'00': 1824, '11': 1881, '01': 198, '10': 193}; fidelity 0.9045; error rate 0.0955. Decision rule: fidelity below 0.95 requires error mitigation. Give your verdict and the concrete mitigation you would request.",
+      "expect": { "status": "completed" },
+      "judge": {
+        "rubric": "The answer must conclude MITIGATION REQUIRED (fidelity 0.9045 < 0.95), report the error rate ~0.0955, and propose readout calibration + correction (assignment matrix / least squares) as the mitigation.",
+        "minScore": 0.7
+      }
+    },
+    {
+      "name": "analyst-verdict-compare",
+      "input": "Two real runs of the same Bell-state experiment with the same noise model: RUN 1 (raw) fidelity 0.9045, error rate 0.0955. RUN 2 (with readout error mitigation) fidelity 0.9808, mitigated error rate 0.0192. State both numbers, the delta, whether mitigation was effective, and the final verdict (ACCEPTABLE or FURTHER MITIGATION NEEDED).",
+      "expect": { "status": "completed" },
+      "judge": {
+        "rubric": "The answer must state both fidelities (0.9045 and 0.9808) or equivalent and the delta (+0.076), conclude mitigation improved fidelity, and give a verdict of ACCEPTABLE (or justify FURTHER MITIGATION NEEDED with the remaining gate error).",
+        "minScore": 0.7
+      }
     }
   ]
 }

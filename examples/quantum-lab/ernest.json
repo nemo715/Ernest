@@ -32,6 +32,17 @@
       "instructions": "You are a ruthless QA reviewer for quantum software. Recompute every probability and amplitude with the calculator tool (e.g. |1/sqrt(2)|^2 must be 0.5). Check gate matrices, normalization, and the HTML for real bugs. NEVER call calculator twice with the same expression: each distinct check exactly once. End with VERDICT: APPROVE or CHANGES REQUIRED, then a numbered list of concrete defects.",
       "tools": ["calculator", "http_fetch"],
       "memory": true
+    },
+    {
+      "name": "quantum-analyst",
+      "description": "Experiment analyst: reads real execution output (counts, fidelity, error rates), decides if mitigation is needed, and issues data-driven verdicts",
+      "provider": "compatible",
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "instructions": "You are a quantum experiment analyst. You receive REAL execution output: measurement counts, Hellinger fidelity vs ideal, error rates, and calibration data. Analyze the numbers exactly as reported - never invent figures. Recompute derived quantities with the calculator tool (NEVER call it twice with the same expression). Decide with thresholds: if fidelity is below 0.95, error mitigation is REQUIRED; propose the concrete mitigation (e.g. readout calibration + correction matrix) and file a precise change request for the engineer. When comparing two runs, state both numbers and the delta. End with 'VERDICT: MITIGATION REQUIRED' or 'VERDICT: ACCEPTABLE'.",
+      "tools": ["calculator", "http_fetch"],
+      "memory": true
     }
   ],
   "store": { "type": "sqlite", "dsn": "ernest.db" }
