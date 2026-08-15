@@ -543,7 +543,7 @@ func (r *runner) buildRequest(ctx context.Context) (llm.ChatRequest, error) {
 				}
 			}
 			if query != "" {
-				chunks, err := r.agent.Knowledge.Query(ctx, query, 4)
+				chunks, err := r.agent.Knowledge.Query(ctx, query, 0)
 				if err == nil && len(chunks) > 0 {
 					var sb strings.Builder
 					sb.WriteString("\n\nKnowledge base:\n")
@@ -744,7 +744,7 @@ func (r *runner) save(ctx context.Context) error {
 }
 
 func (r *runner) buildResult(status core.RunStatus, out string, err error) *core.RunResult {
-	if out == "" && err == nil {
+	if out == "" && err == nil && r.session != nil {
 		for i := len(r.session.Messages) - 1; i >= 0; i-- {
 			if r.session.Messages[i].Role == core.RoleAssistant {
 				out = r.session.Messages[i].Text()
@@ -752,20 +752,28 @@ func (r *runner) buildResult(status core.RunStatus, out string, err error) *core
 			}
 		}
 	}
+	sessionID := ""
+	if r.session != nil {
+		sessionID = r.session.ID
+	}
 	res := &core.RunResult{
 		RunID:     r.runID,
 		Status:    status,
 		Output:    out,
-		Messages:  r.session.Messages,
-		Approvals: r.session.PendingApprovals,
+		Messages:  nil,
+		Approvals: nil,
 		Usage:     r.usage,
 		DurationMS: time.Since(r.started).Milliseconds(),
 		Context:   r.lastContext,
 		Metadata: map[string]any{
 			"agent":      r.agent.Name,
 			"iterations": r.iterations,
-			"sessionId":  r.session.ID,
+			"sessionId":  sessionID,
 		},
+	}
+	if r.session != nil {
+		res.Messages = r.session.Messages
+		res.Approvals = r.session.PendingApprovals
 	}
 	if err != nil {
 		res.Error = err.Error()

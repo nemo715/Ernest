@@ -1,0 +1,20 @@
+{
+  "scenarios": [
+    {
+      "name": "harness-smoke",
+      "input": "hello",
+      "expect": {
+        "status": "completed",
+        "outputContains": ["Hello from the mock provider"]
+      }
+    },
+    {
+      "name": "ctx-instructions-present",
+      "input": "hello",
+      "expect": {
+        "status": "completed",
+        "contextContains": ["You are a precise assistant."]
+      }
+    }
+  ]
+}

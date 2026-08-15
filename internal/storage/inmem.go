@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/nemo715/Ernest/internal/core"
 )
@@ -13,11 +14,12 @@ import (
 type InMemoryStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	feedback map[string][]*RunFeedback
 }
 
 // NewInMemoryStore builds an empty in-memory store.
 func NewInMemoryStore() *InMemoryStore {
-	return &InMemoryStore{sessions: map[string]*Session{}}
+	return &InMemoryStore{sessions: map[string]*Session{}, feedback: map[string][]*RunFeedback{}}
 }
 
 func (s *InMemoryStore) Save(ctx context.Context, sess *Session) error {
@@ -73,3 +75,28 @@ func (s *InMemoryStore) List(ctx context.Context, agentName string) ([]*Session,
 }
 
 func (s *InMemoryStore) Close() error { return nil }
+
+func (s *InMemoryStore) SaveFeedback(ctx context.Context, f *RunFeedback) error {
+	if f.RunID == "" {
+		return core.NewError(core.KindMemory, "feedback run id is required")
+	}
+	if f.CreatedAt == "" {
+		f.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	s.mu.Lock()
+	s.feedback[f.RunID] = append(s.feedback[f.RunID], f)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *InMemoryStore) ListFeedback(ctx context.Context, runID string) ([]*RunFeedback, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*RunFeedback, 0, len(s.feedback[runID]))
+	for _, f := range s.feedback[runID] {
+		c := *f
+		out = append(out, &c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
+	return out, nil
+}

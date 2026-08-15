@@ -16,6 +16,7 @@ export function RunTable({ runs }: { runs: RunSummary[] }) {
             <th>Run</th>
             <th>Agent</th>
             <th>Status</th>
+            <th>Feedback</th>
             <th className="num">Spans</th>
             <th className="num">Duration</th>
             <th>Source</th>
@@ -33,6 +34,15 @@ export function RunTable({ runs }: { runs: RunSummary[] }) {
               <td>{r.agent || "—"}</td>
               <td>
                 <StatusBadge status={r.status} />
+              </td>
+              <td>
+                {r.rating ? (
+                  <span className="badge accent">{"★".repeat(r.rating)}<span className="faint">{"☆".repeat(5 - r.rating)}</span>{r.feedbackCount ? ` · ${r.feedbackCount}` : ""}</span>
+                ) : r.feedbackCount ? (
+                  <Badge tone="muted">{r.feedbackCount}× feedback</Badge>
+                ) : (
+                  <span className="faint">—</span>
+                )}
               </td>
               <td className="num">{r.spanCount}</td>
               <td className="num">{r.durationMs ? `${r.durationMs}ms` : "—"}</td>

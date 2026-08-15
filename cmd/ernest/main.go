@@ -560,6 +560,11 @@ func cmdNew(args []string) error {
 			fmt.Printf("skip %s (already exists)\n", path)
 			continue
 		}
+		if parent := filepath.Dir(path); parent != "." {
+			if err := os.MkdirAll(parent, 0o755); err != nil {
+				return err
+			}
+		}
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			return err
 		}

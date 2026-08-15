@@ -125,3 +125,30 @@ func TestMockEmbedErr(t *testing.T) {
 		t.Fatal("embed error must propagate")
 	}
 }
+
+// TestMockEmbedWordOverlap locks in that texts sharing words get
+// similar vectors (word-hash embedding), which is what makes mock
+// knowledge bases and semantic memory usable without an API key.
+func TestMockEmbedWordOverlap(t *testing.T) {
+	m := NewMock(MockConfig{EmbedDim: 256})
+	vecs, err := m.Embed(context.Background(), []string{
+		"quantum circuits run on the Aer simulator",
+		"quantum circuits and error mitigation",
+		"the weather in Paris is rainy today",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b, c := vecs[0], vecs[1], vecs[2]
+	if overlap(a, b) <= overlap(a, c) {
+		t.Fatalf("related texts must be more similar than unrelated ones")
+	}
+}
+
+func overlap(a, b []float32) float64 {
+	var dot float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+	}
+	return dot
+}

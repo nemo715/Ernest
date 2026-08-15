@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"hash/fnv"
+	"math"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/nemo715/Ernest/internal/core"
 )
@@ -154,28 +157,53 @@ func (m *MockProvider) Stream(ctx context.Context, req ChatRequest) (Stream, err
 	return &channelStream{ch: ch, ctx: ctx, done: done}, nil
 }
 
-// Embed returns deterministic hash-based vectors of EmbedDim.
+// Embed returns deterministic hash-based vectors: each word token
+// increments a dimension (FNV-1a of the lowercased word), then the
+// vector is normalized. Texts sharing words get similar vectors, so
+// mock knowledge bases and semantic memory actually retrieve relevant
+// chunks without any API key.
 func (m *MockProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if m.cfg.EmbedErr != nil {
 		return nil, m.cfg.EmbedErr
 	}
 	dim := m.cfg.EmbedDim
 	if dim <= 0 {
-		dim = 8
+		dim = 64
 	}
 	out := make([][]float32, 0, len(texts))
 	for _, t := range texts {
-		h := fnv.New32a()
-		_, _ = h.Write([]byte(t))
-		seed := int64(h.Sum32())
 		v := make([]float32, dim)
-		for i := range v {
-			seed = seed*6364136223846793005 + 1442695040888963407
-			v[i] = float32(seed%1000) / 1000.0
+		for _, word := range tokenize(t) {
+			h := fnv.New32a()
+			_, _ = h.Write([]byte(word))
+			v[h.Sum32()%uint32(dim)]++
 		}
-		out = append(out, v)
+		out = append(out, normalizeVec(v))
 	}
 	return out, nil
+}
+
+// tokenize lowercases and splits text into alphanumeric word tokens.
+func tokenize(s string) []string {
+	s = strings.ToLower(s)
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+func normalizeVec(v []float32) []float32 {
+	var sum float64
+	for _, f := range v {
+		sum += float64(f) * float64(f)
+	}
+	if sum == 0 {
+		return v
+	}
+	n := math.Sqrt(sum)
+	for i, f := range v {
+		v[i] = float32(float64(f) / n)
+	}
+	return v
 }
 
 // MockStreamJSON serialises a slice of StreamChunks (helper for tests).

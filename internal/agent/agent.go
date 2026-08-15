@@ -35,6 +35,9 @@ type Agent struct {
 	Memory       *memory.Memory
 	Store        storage.SessionStore // convenience: auto-creates Memory when set
 	Knowledge    *knowledge.KnowledgeBase
+	// SemanticMemory backs the remember/recall tools with a per-agent
+	// vector collection (in-memory by default, Qdrant when configured).
+	SemanticMemory *knowledge.KnowledgeBase
 	MaxIterations int
 	Temperature  *float64
 	MaxTokens    int

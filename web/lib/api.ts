@@ -13,6 +13,7 @@ import type {
   ChatRequest,
   FailureRecord,
   RunEvent,
+  RunFeedback,
   RunSummary,
   RunTrace,
   Session,
@@ -96,6 +97,22 @@ export function getRuns(): Promise<{ runs: RunSummary[] }> {
 
 export function getRunTrace(runId: string): Promise<RunTrace> {
   return requestJSON(`/api/runs/${encodeURIComponent(runId)}/trace`);
+}
+
+export function getFeedback(runId: string): Promise<{ feedback: RunFeedback[] }> {
+  return requestJSON(`/api/runs/${encodeURIComponent(runId)}/feedback`);
+}
+
+export async function postFeedback(
+  runId: string,
+  rating: number,
+  comment?: string,
+): Promise<void> {
+  await requestJSON(`/api/runs/${encodeURIComponent(runId)}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rating, comment }),
+  });
 }
 
 export function getFailures(limit = 50): Promise<{ records: FailureRecord[] }> {

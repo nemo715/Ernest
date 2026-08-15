@@ -579,6 +579,236 @@ func TestFailuresEndpoint(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// feedback (collaboration: shareable run links + thumbs/comment)
+// ---------------------------------------------------------------------------
+
+// runOneChat fires a chat and returns the produced run id.
+func runOneChat(t *testing.T, ts *httptest.Server, agentName string) string {
+	t.Helper()
+	resp, err := http.Post(ts.URL+"/api/chat", "application/json",
+		strings.NewReader(`{"agent":"`+agentName+`","input":"hi","sessionId":"s-fb"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var runID string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev core.RunEvent
+		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev) != nil {
+			continue
+		}
+		runID = ev.RunID
+		if ev.Type == core.EventRunComplete {
+			break
+		}
+	}
+	if runID == "" {
+		t.Fatal("no run id from chat")
+	}
+	return runID
+}
+
+func postFeedback(t *testing.T, ts *httptest.Server, runID string, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(ts.URL+"/api/runs/"+runID+"/feedback", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestFeedbackRoundtrip(t *testing.T) {
+	ts := newTestServer(t)
+	runID := runOneChat(t, ts, "assistant")
+
+	// Save a rating + comment.
+	resp := postFeedback(t, ts, runID, `{"rating":5,"comment":"Great trace, saved the day"}`)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("post feedback status = %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+
+	// Roundtrip: GET returns the stored entry.
+	r2, err := http.Get(ts.URL + "/api/runs/" + runID + "/feedback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("get feedback status = %d", r2.StatusCode)
+	}
+	var fb struct {
+		Feedback []storage.RunFeedback `json:"feedback"`
+	}
+	if err := json.NewDecoder(r2.Body).Decode(&fb); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb.Feedback) != 1 || fb.Feedback[0].Rating != 5 || fb.Feedback[0].Comment != "Great trace, saved the day" || fb.Feedback[0].RunID != runID {
+		t.Fatalf("feedback = %+v", fb.Feedback)
+	}
+	if fb.Feedback[0].CreatedAt == "" {
+		t.Fatal("feedback missing createdAt")
+	}
+
+	// A second entry updates the latest rating; list stays append-only.
+	resp = postFeedback(t, ts, runID, `{"rating":4}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("second post status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The runs list carries the summary badge.
+	r3, err := http.Get(ts.URL + "/api/runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r3.Body.Close()
+	var list struct {
+		Runs []struct {
+			RunID         string `json:"runId"`
+			FeedbackCount int    `json:"feedbackCount"`
+			Rating        int    `json:"rating"`
+		} `json:"runs"`
+	}
+	if err := json.NewDecoder(r3.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Runs) != 1 || list.Runs[0].RunID != runID {
+		t.Fatalf("runs = %+v", list.Runs)
+	}
+	if list.Runs[0].FeedbackCount != 2 || list.Runs[0].Rating != 4 {
+		t.Fatalf("summary = %+v", list.Runs[0])
+	}
+
+	// The run trace JSON embeds the feedback too (shareable artifact).
+	r4, err := http.Get(ts.URL + "/api/runs/" + runID + "/trace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r4.Body.Close()
+	var tr struct {
+		Feedback []storage.RunFeedback `json:"feedback"`
+	}
+	if err := json.NewDecoder(r4.Body).Decode(&tr); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.Feedback) != 2 || tr.Feedback[0].Rating != 5 {
+		t.Fatalf("trace feedback = %+v", tr.Feedback)
+	}
+}
+
+func TestFeedbackValidation(t *testing.T) {
+	ts := newTestServer(t)
+	runID := runOneChat(t, ts, "assistant")
+
+	// Ratings must be 1..5.
+	for _, body := range []string{`{"rating":0}`, `{"rating":6}`, `{"rating":-1}`} {
+		resp := postFeedback(t, ts, runID, body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("rating %s status = %d, want 400", body, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Malformed JSON.
+	resp := postFeedback(t, ts, runID, `not-json`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Unknown run -> 404.
+	resp = postFeedback(t, ts, "no-such-run", `{"rating":3}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown run status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestFeedbackInMemoryFallback(t *testing.T) {
+	// A store that does NOT implement FeedbackStore must still serve
+	// feedback from the server's in-memory map (auth-less local semantics).
+	assistant := agent.New("assistant", llm.NewMock(llm.MockConfig{
+		Script: []llm.MockTurn{{Content: "hi", FinishReason: "stop"}},
+	}))
+	assistant.Store = &bareStore{}
+	srv, err := New(Options{Agents: []*agent.Agent{assistant}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		_ = srv.Close()
+	})
+
+	runID := runOneChat(t, ts, "assistant")
+	resp := postFeedback(t, ts, runID, `{"rating":3,"comment":"fallback"}`)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("post status = %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	r2, err := http.Get(ts.URL + "/api/runs/" + runID + "/feedback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Body.Close()
+	var fb struct {
+		Feedback []storage.RunFeedback `json:"feedback"`
+	}
+	if err := json.NewDecoder(r2.Body).Decode(&fb); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb.Feedback) != 1 || fb.Feedback[0].Rating != 3 || fb.Feedback[0].Comment != "fallback" {
+		t.Fatalf("fallback feedback = %+v", fb.Feedback)
+	}
+}
+
+// bareStore is a SessionStore without feedback persistence.
+type bareStore struct {
+	sessions map[string]*storage.Session
+}
+
+func (b *bareStore) Save(ctx context.Context, s *storage.Session) error {
+	if b.sessions == nil {
+		b.sessions = map[string]*storage.Session{}
+	}
+	b.sessions[s.ID] = s
+	return nil
+}
+
+func (b *bareStore) Get(ctx context.Context, id string) (*storage.Session, error) {
+	s, ok := b.sessions[id]
+	if !ok {
+		return nil, core.NewError(core.KindMemory, "session not found: "+id)
+	}
+	return s, nil
+}
+
+func (b *bareStore) Delete(ctx context.Context, id string) error {
+	delete(b.sessions, id)
+	return nil
+}
+
+func (b *bareStore) List(ctx context.Context, agentName string) ([]*storage.Session, error) {
+	out := []*storage.Session{}
+	for _, s := range b.sessions {
+		if agentName == "" || s.AgentName == agentName {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+func (b *bareStore) Close() error { return nil }
+
+// ---------------------------------------------------------------------------
 // trace ingestion (any framework can push traces)
 // ---------------------------------------------------------------------------
 

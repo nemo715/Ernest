@@ -13,6 +13,7 @@ import Link from "next/link";
 import { Shell } from "@/components/Shell";
 import {
   Badge,
+  Button,
   Card,
   CodeBlock,
   CopyButton,
@@ -22,9 +23,9 @@ import {
   StatusBadge,
   Tabs,
 } from "@/components/ui";
-import { getRunTrace } from "@/lib/api";
-import type { RunTrace, TraceSpan } from "@/lib/types";
-import { fmtClock, fmtCost, fmtDuration, fmtNum } from "@/lib/format";
+import { getFeedback, getRunTrace, postFeedback } from "@/lib/api";
+import type { RunFeedback, RunTrace, TraceSpan } from "@/lib/types";
+import { fmtClock, fmtCost, fmtDuration, fmtNum, fmtTime } from "@/lib/format";
 
 const KIND_TONE: Record<string, string> = {
   llm: "accent",
@@ -49,6 +50,16 @@ export default function RunDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState("trace");
   const [open, setOpen] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<RunFeedback[] | null>(null);
+  const [fbRating, setFbRating] = useState(0);
+  const [fbComment, setFbComment] = useState("");
+  const [fbBusy, setFbBusy] = useState(false);
+  const [fbError, setFbError] = useState<string | null>(null);
+  const [shareURL, setShareURL] = useState<string>("");
+
+  useEffect(() => {
+    setShareURL(window.location.href);
+  }, []);
 
   useEffect(() => {
     if (!runId || runId === "_") return; // placeholder id: wait for the real one
@@ -56,7 +67,27 @@ export default function RunDetailPage() {
     getRunTrace(runId)
       .then(setTrace)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    getFeedback(runId)
+      .then((r) => setFeedback(r.feedback))
+      .catch(() => setFeedback([]));
   }, [runId]);
+
+  async function submitFeedback() {
+    if (fbRating < 1 || fbBusy) return;
+    setFbBusy(true);
+    setFbError(null);
+    try {
+      await postFeedback(runId, fbRating, fbComment.trim() || undefined);
+      const r = await getFeedback(runId);
+      setFeedback(r.feedback);
+      setFbRating(0);
+      setFbComment("");
+    } catch (e: unknown) {
+      setFbError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFbBusy(false);
+    }
+  }
 
   const wf = useMemo(() => (trace ? buildWaterfall(trace.spans) : null), [trace]);
 
@@ -96,7 +127,12 @@ export default function RunDetailPage() {
             {trace.startedAt && <span className="faint">{fmtClock(trace.startedAt)}</span>}
           </span>
         }
-        actions={<CopyButton text={runId} label="copy id" />}
+        actions={
+          <span className="row">
+            {shareURL && <CopyButton text={shareURL} label="copy shareable link" />}
+            <CopyButton text={runId} label="copy id" />
+          </span>
+        }
       />
 
       <div className="stat-grid" style={{ marginBottom: 16 }}>
@@ -133,6 +169,17 @@ export default function RunDetailPage() {
           for the recorded reproduction data.
         </div>
       )}
+
+      <FeedbackCard
+        feedback={feedback}
+        rating={fbRating}
+        comment={fbComment}
+        busy={fbBusy}
+        error={fbError}
+        onRating={setFbRating}
+        onComment={setFbComment}
+        onSubmit={submitFeedback}
+      />
 
       <Card>
         <Tabs
@@ -223,6 +270,85 @@ export default function RunDetailPage() {
         </div>
       </Card>
     </Shell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Feedback card (collaboration: rate + comment a shareable run)
+// ---------------------------------------------------------------------------
+
+function FeedbackCard({
+  feedback,
+  rating,
+  comment,
+  busy,
+  error,
+  onRating,
+  onComment,
+  onSubmit,
+}: {
+  feedback: RunFeedback[] | null;
+  rating: number;
+  comment: string;
+  busy: boolean;
+  error: string | null;
+  onRating: (n: number) => void;
+  onComment: (s: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <Card
+      title="Feedback"
+      desc="Rate this run and leave a note — the trace JSON carries it, so shared links keep the context."
+    >
+      <div className="row wrap" style={{ gap: 10, alignItems: "center" }}>
+        <div className="row" style={{ gap: 4 }} role="radiogroup" aria-label="Rating">
+          {[1, 2, 3, 4, 5].map((n) => (
+            <button
+              key={n}
+              role="radio"
+              aria-checked={rating === n}
+              aria-label={`${n} star${n === 1 ? "" : "s"}`}
+              className="star-btn"
+              style={{ opacity: rating >= n ? 1 : 0.35 }}
+              onClick={() => onRating(n)}
+            >
+              ★
+            </button>
+          ))}
+        </div>
+        <input
+          className="input mono"
+          style={{ flex: 1, minWidth: 220 }}
+          placeholder="optional comment…"
+          value={comment}
+          onChange={(e) => onComment(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onSubmit();
+          }}
+        />
+        <Button variant="primary" size="sm" disabled={rating < 1 || busy} onClick={onSubmit}>
+          {busy ? "saving…" : "save"}
+        </Button>
+      </div>
+      {error && <div className="notice danger" style={{ marginTop: 10 }}>{error}</div>}
+      {feedback && feedback.length > 0 && (
+        <ul className="fb-list" style={{ marginTop: 12 }}>
+          {feedback.map((f, i) => (
+            <li key={i} className="row wrap" style={{ gap: 8, marginBottom: 6 }}>
+              <span className="badge accent">{"★".repeat(f.rating)}<span className="faint">{"☆".repeat(5 - f.rating)}</span></span>
+              {f.comment && <span>{f.comment}</span>}
+              <span className="faint small grow">{fmtTime(f.createdAt)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {feedback && feedback.length === 0 && (
+        <div className="faint small" style={{ marginTop: 10 }}>
+          No feedback yet — be the first to rate this run.
+        </div>
+      )}
+    </Card>
   );
 }
 

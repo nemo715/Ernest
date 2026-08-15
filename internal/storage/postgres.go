@@ -55,6 +55,15 @@ func (s *PostgresStore) init(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, q); err != nil {
 		return core.NewError(core.KindMemory, "postgres init: "+err.Error(), err)
 	}
+	fq := `CREATE TABLE IF NOT EXISTS ernest_feedback (
+		run_id TEXT NOT NULL,
+		rating INTEGER NOT NULL,
+		comment TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL
+	)`
+	if _, err := s.pool.Exec(ctx, fq); err != nil {
+		return core.NewError(core.KindMemory, "postgres feedback init: "+err.Error(), err)
+	}
 	return nil
 }
 
@@ -124,4 +133,36 @@ func (s *PostgresStore) List(ctx context.Context, agentName string) ([]*Session,
 func (s *PostgresStore) Close() error {
 	s.pool.Close()
 	return nil
+}
+
+func (s *PostgresStore) SaveFeedback(ctx context.Context, f *RunFeedback) error {
+	if f.RunID == "" {
+		return core.NewError(core.KindMemory, "feedback run id is required")
+	}
+	if f.CreatedAt == "" {
+		f.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	q := `INSERT INTO ernest_feedback (run_id, rating, comment, created_at) VALUES ($1, $2, $3, $4)`
+	if _, err := s.pool.Exec(ctx, q, f.RunID, f.Rating, f.Comment, f.CreatedAt); err != nil {
+		return core.NewError(core.KindMemory, "postgres feedback save: "+err.Error(), err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListFeedback(ctx context.Context, runID string) ([]*RunFeedback, error) {
+	q := `SELECT run_id, rating, comment, created_at FROM ernest_feedback WHERE run_id = $1 ORDER BY created_at`
+	rows, err := s.pool.Query(ctx, q, runID)
+	if err != nil {
+		return nil, core.NewError(core.KindMemory, "postgres feedback list: "+err.Error(), err)
+	}
+	defer rows.Close()
+	out := []*RunFeedback{}
+	for rows.Next() {
+		var f RunFeedback
+		if err := rows.Scan(&f.RunID, &f.Rating, &f.Comment, &f.CreatedAt); err != nil {
+			return nil, core.NewError(core.KindMemory, "postgres feedback scan: "+err.Error(), err)
+		}
+		out = append(out, &f)
+	}
+	return out, nil
 }

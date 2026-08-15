@@ -17,9 +17,9 @@ import (
 // SQLiteStore persists sessions to a SQLite file using the pure-Go
 // modernc driver — no native compilation, safe on every platform.
 type SQLiteStore struct {
-	db  *sql.DB
-	ctx context.Context
-	cnl context.CancelFunc
+	db    *sql.DB
+	ctx   context.Context
+	cnl   context.CancelFunc
 	table string
 }
 
@@ -54,6 +54,15 @@ func (s *SQLiteStore) init() error {
 	)`, s.table)
 	if _, err := s.db.ExecContext(s.ctx, q); err != nil {
 		return core.NewError(core.KindMemory, "sqlite init: "+err.Error(), err)
+	}
+	fq := `CREATE TABLE IF NOT EXISTS ernest_feedback (
+		run_id TEXT NOT NULL,
+		rating INTEGER NOT NULL,
+		comment TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL
+	)`
+	if _, err := s.db.ExecContext(s.ctx, fq); err != nil {
+		return core.NewError(core.KindMemory, "sqlite feedback init: "+err.Error(), err)
 	}
 	return nil
 }
@@ -124,6 +133,38 @@ func (s *SQLiteStore) List(ctx context.Context, agentName string) ([]*Session, e
 func (s *SQLiteStore) Close() error {
 	s.cnl()
 	return s.db.Close()
+}
+
+func (s *SQLiteStore) SaveFeedback(ctx context.Context, f *RunFeedback) error {
+	if f.RunID == "" {
+		return core.NewError(core.KindMemory, "feedback run id is required")
+	}
+	if f.CreatedAt == "" {
+		f.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	q := `INSERT INTO ernest_feedback (run_id, rating, comment, created_at) VALUES (?, ?, ?, ?)`
+	if _, err := s.db.ExecContext(ctx, q, f.RunID, f.Rating, f.Comment, f.CreatedAt); err != nil {
+		return core.NewError(core.KindMemory, "sqlite feedback save: "+err.Error(), err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ListFeedback(ctx context.Context, runID string) ([]*RunFeedback, error) {
+	q := `SELECT run_id, rating, comment, created_at FROM ernest_feedback WHERE run_id = ? ORDER BY created_at`
+	rows, err := s.db.QueryContext(ctx, q, runID)
+	if err != nil {
+		return nil, core.NewError(core.KindMemory, "sqlite feedback list: "+err.Error(), err)
+	}
+	defer rows.Close()
+	out := []*RunFeedback{}
+	for rows.Next() {
+		var f RunFeedback
+		if err := rows.Scan(&f.RunID, &f.Rating, &f.Comment, &f.CreatedAt); err != nil {
+			return nil, core.NewError(core.KindMemory, "sqlite feedback scan: "+err.Error(), err)
+		}
+		out = append(out, &f)
+	}
+	return out, nil
 }
 
 // FileName sanitises a DSN into a display name (for CLI output).

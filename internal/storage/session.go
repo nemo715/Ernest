@@ -12,11 +12,11 @@ import (
 
 // Session is the persisted state of one conversation.
 type Session struct {
-	ID        string                `json:"id"`
-	AgentName string                `json:"agentName"`
-	UserID    string                `json:"userId,omitempty"`
-	Messages  []core.Message        `json:"messages"`
-	Metadata  map[string]string     `json:"metadata,omitempty"`
+	ID        string            `json:"id"`
+	AgentName string            `json:"agentName"`
+	UserID    string            `json:"userId,omitempty"`
+	Messages  []core.Message    `json:"messages"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 	// PendingApprovals is the HITL queue waiting on a human.
 	PendingApprovals []core.ApprovalRequest `json:"pendingApprovals,omitempty"`
 	// ResolvedApprovals maps approval id -> decision (kept for audit).
@@ -26,13 +26,13 @@ type Session struct {
 	// ToolCache maps tool call id -> serialized result so resumed runs
 	// replay without re-executing side-effectful tools.
 	ToolCache map[string]json.RawMessage `json:"toolCache,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	CreatedAt time.Time                  `json:"createdAt"`
+	UpdatedAt time.Time                  `json:"updatedAt"`
 }
 
 // PendingToolCall links a blocked tool call to its approval request.
 type PendingToolCall struct {
-	ApprovalID string       `json:"approvalId"`
+	ApprovalID string        `json:"approvalId"`
 	Call       core.ToolCall `json:"call"`
 }
 

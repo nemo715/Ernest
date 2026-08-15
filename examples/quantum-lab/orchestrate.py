@@ -37,6 +37,7 @@ import json
 import re
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 from ernest import Client
@@ -171,6 +172,9 @@ def run_code(code: str, path: Path, timeout: int = 300) -> tuple[str, str]:
     agent code is persisted to `path` (artifact); execution appends the results
     harness so the JSON contract does not depend on the model remembering to
     print it."""
+    # Resolve up front: with a relative --out, the subprocess runs with cwd=
+    # path.parent, so a relative run_path would be resolved twice (build/build).
+    path = path.resolve()
     path.write_text(code, encoding="utf-8")
     run_path = path.with_name(path.stem + "_run.py")
     run_path.write_text(code + HARNESS, encoding="utf-8")
@@ -336,6 +340,7 @@ def assemble_ipynb(cells: list[dict]) -> dict:
         if isinstance(src, list):
             src = "".join(str(s) for s in src)
         cell = {"cell_type": ctype, "metadata": {}, "source": src.splitlines(keepends=True)}
+        cell["id"] = uuid.uuid4().hex
         if ctype == "code":
             cell.update({"execution_count": c.get("execution_count", i + 1), "outputs": c.get("outputs", [])})
         out.append(cell)

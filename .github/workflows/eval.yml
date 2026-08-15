@@ -1,0 +1,76 @@
+# Eval regression gate.
+#
+# What it does
+#   build  – compiles the whole repo and runs go vet (always, keyless).
+#   eval   – runs the quantum-lab scenario suite against a saved baseline
+#            and fails the build when a scenario regresses. Uses the real
+#            OpenRouter provider (gpt-4o-mini), so it only runs when the
+#            OPENROUTER_API_KEY repository secret is configured (GitHub
+#            does not expose secrets to PRs from forks; the eval step is
+#            skipped there instead of failing everything).
+#
+# Refreshing the baseline (when a scenario is intentionally changed)
+#   1. Run locally with a real key:
+#        ernest eval --config examples/quantum-lab/ernest.json \
+#                    --scenarios examples/quantum-lab/scenarios-quantum.json \
+#                    --json --update-baseline
+#      (writes eval-baseline.json in the repo root)
+#   2. Inspect the JSON report: every scenario must pass before committing
+#      the new baseline together with the scenario change.
+#   3. Commit eval-baseline.json + the scenario edit in the same PR — the
+#      workflow below then gates future changes against the new baseline.
+#
+# Why an LLM-judged gate
+#   Failed scenarios and pass->fail regressions exit non-zero, so the job
+#   fails on real drift (instructions no longer reaching the model, tools
+#   breaking, prompt drift). Judge scores are stochastic at the margin —
+#   scenarios with judge.minScore should be written so the subject model
+#   meets the rubric reliably (see examples/quantum-lab scenarios).
+
+name: eval
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+
+  eval-quantum:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Build ernest binary
+        run: go build -o ernest ./cmd/ernest
+      - name: Eval regression gate (quantum-lab)
+        if: env.OPENROUTER_API_KEY != ''
+        run: |
+          ./ernest eval \
+            --config examples/quantum-lab/ernest.json \
+            --scenarios examples/quantum-lab/scenarios-quantum.json \
+            --json \
+            --baseline eval-baseline.json
+      - name: Keyless smoke gate (mock provider)
+        if: env.OPENROUTER_API_KEY == ''
+        run: |
+          go run ./cmd/ernest eval \
+            --config _demo/eval-demo/ernest-mock.json \
+            --scenarios .github/ci-scenarios-mock.json \
+            --json

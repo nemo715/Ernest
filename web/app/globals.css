@@ -630,6 +630,34 @@ table.data .num {
   margin: 0 0 5px;
 }
 
+/* star rating buttons (run feedback) */
+.star-btn {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--accent);
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.star-btn:hover {
+  transform: scale(1.2);
+}
+
+.star-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-radius: var(--radius-sm);
+}
+
+.fb-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
 /* ---------------------------------------------------------------------------
  * code + JSON
  * ------------------------------------------------------------------------ */

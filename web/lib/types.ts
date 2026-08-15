@@ -228,6 +228,18 @@ export interface RunSummary {
   durationMs?: number;
   source?: string; // internal | ingested
   spanCount: number;
+  /** Human feedback summary (0 = none). */
+  feedbackCount?: number;
+  /** Latest rating 1..5. */
+  rating?: number;
+}
+
+/** One human rating/comment on a run (collaboration layer). */
+export interface RunFeedback {
+  runId: string;
+  rating: number; // 1..5
+  comment?: string;
+  createdAt: string;
 }
 
 export interface RunTrace {
@@ -238,6 +250,7 @@ export interface RunTrace {
   agent?: string;
   startedAt?: string;
   context?: RunContext;
+  feedback?: RunFeedback[];
 }
 
 export interface FailureRecord {

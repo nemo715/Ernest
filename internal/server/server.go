@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nemo715/Ernest/internal/a2a"
 	"github.com/nemo715/Ernest/internal/agent"
 	"github.com/nemo715/Ernest/internal/audit"
-	"github.com/nemo715/Ernest/internal/a2a"
 	"github.com/nemo715/Ernest/internal/core"
 	"github.com/nemo715/Ernest/internal/eval"
 	"github.com/nemo715/Ernest/internal/storage"
@@ -55,6 +55,11 @@ type Server struct {
 	tracesMu sync.Mutex
 	traces   map[string]runTrace // runID -> spans + metrics
 
+	// feedbackMu guards the in-memory feedback fallback (used when the
+	// store does not implement storage.FeedbackStore).
+	feedbackMu sync.Mutex
+	feedback   map[string][]*storage.RunFeedback
+
 	// Failures feed: per-run event buffer flushed to the JSONL file on
 	// run.complete (failed status). Only used when FailuresPath is set.
 	failMu   sync.Mutex
@@ -87,12 +92,12 @@ type IngestedTrace struct {
 
 // runTrace is the stored trace of one run (for /api/runs/{id}/trace).
 type runTrace struct {
-	Spans     []core.TraceSpan   `json:"spans"`
-	Metrics   *core.RunMetrics   `json:"metrics,omitempty"`
-	Source    string             `json:"source,omitempty"` // internal | ingested
-	Agent     string             `json:"agent,omitempty"`
-	StartedAt time.Time          `json:"startedAt,omitempty"`
-	Context   *core.RunContext   `json:"context,omitempty"` // what the model saw
+	Spans     []core.TraceSpan `json:"spans"`
+	Metrics   *core.RunMetrics `json:"metrics,omitempty"`
+	Source    string           `json:"source,omitempty"` // internal | ingested
+	Agent     string           `json:"agent,omitempty"`
+	StartedAt time.Time        `json:"startedAt,omitempty"`
+	Context   *core.RunContext `json:"context,omitempty"` // what the model saw
 }
 
 // New builds a server. Agent names must be unique.
@@ -171,6 +176,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/runs/{id}/trace", s.handleRunTrace) // legacy alias
 	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
 	s.mux.HandleFunc("GET /api/runs", s.handleRuns)
+	s.mux.HandleFunc("POST /api/runs/{id}/feedback", s.handlePostFeedback)
+	s.mux.HandleFunc("GET /api/runs/{id}/feedback", s.handleGetFeedback)
 	s.mux.HandleFunc("GET /api/failures", s.handleFailures)
 	s.mux.HandleFunc("GET /ws/chat", s.handleWS)
 	s.mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentWellKnown)
@@ -530,7 +537,6 @@ func (s *Server) handleIngestTrace(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "traceId": t.TraceID, "spans": len(t.Spans)})
 }
 
-
 func (s *Server) recordTrace(runID string, sp core.TraceSpan) {
 	s.tracesMu.Lock()
 	defer s.tracesMu.Unlock()
@@ -582,7 +588,7 @@ func (s *Server) handleRunTrace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown run "+id)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runId": id, "spans": t.Spans, "metrics": t.Metrics, "source": t.Source, "agent": t.Agent, "startedAt": t.StartedAt, "context": t.Context})
+	writeJSON(w, http.StatusOK, map[string]any{"runId": id, "spans": t.Spans, "metrics": t.Metrics, "source": t.Source, "agent": t.Agent, "startedAt": t.StartedAt, "context": t.Context, "feedback": s.listFeedback(r.Context(), id)})
 }
 
 // handleRuns lists all traced runs, newest first (for the console).
@@ -594,6 +600,9 @@ type runSummary struct {
 	DurationMS int64     `json:"durationMs,omitempty"`
 	Source     string    `json:"source,omitempty"`
 	SpanCount  int       `json:"spanCount"`
+	// FeedbackCount and Rating summarize human feedback (0 = none).
+	FeedbackCount int `json:"feedbackCount,omitempty"`
+	Rating        int `json:"rating,omitempty"` // latest rating 1..5
 }
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
@@ -617,6 +626,14 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.tracesMu.Unlock()
+	// Annotate with human feedback (cheap: local stores, small N).
+	for i := range runs {
+		fb := s.listFeedback(r.Context(), runs[i].RunID)
+		runs[i].FeedbackCount = len(fb)
+		if len(fb) > 0 {
+			runs[i].Rating = fb[len(fb)-1].Rating
+		}
+	}
 	sort.Slice(runs, func(i, j int) bool {
 		if runs[i].StartedAt.Equal(runs[j].StartedAt) {
 			return runs[i].RunID < runs[j].RunID
@@ -627,6 +644,84 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		runs = []runSummary{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+}
+
+// handlePostFeedback stores a human rating/comment on a run.
+func (s *Server) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.tracesMu.Lock()
+	_, ok := s.traces[id]
+	s.tracesMu.Unlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "unknown run "+id)
+		return
+	}
+	var body struct {
+		Rating  int    `json:"rating"`
+		Comment string `json:"comment,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid feedback body: "+err.Error())
+		return
+	}
+	if body.Rating < 1 || body.Rating > 5 {
+		writeError(w, http.StatusBadRequest, "rating must be 1..5")
+		return
+	}
+	f := &storage.RunFeedback{
+		RunID:   id,
+		Rating:  body.Rating,
+		Comment: strings.TrimSpace(body.Comment),
+	}
+	if err := s.saveFeedback(r.Context(), f); err != nil {
+		writeError(w, http.StatusInternalServerError, "save feedback: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"feedback": s.listFeedback(r.Context(), id)})
+}
+
+// handleGetFeedback lists the feedback for a run.
+func (s *Server) handleGetFeedback(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.tracesMu.Lock()
+	_, ok := s.traces[id]
+	s.tracesMu.Unlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "unknown run "+id)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"feedback": s.listFeedback(r.Context(), id)})
+}
+
+// saveFeedback persists feedback to the store when it supports it,
+// falling back to the server's in-memory map.
+func (s *Server) saveFeedback(ctx context.Context, f *storage.RunFeedback) error {
+	if fs, ok := s.store.(storage.FeedbackStore); ok {
+		return fs.SaveFeedback(ctx, f)
+	}
+	s.feedbackMu.Lock()
+	defer s.feedbackMu.Unlock()
+	s.feedback[f.RunID] = append(s.feedback[f.RunID], f)
+	return nil
+}
+
+// listFeedback returns the feedback for a run (nil when none).
+func (s *Server) listFeedback(ctx context.Context, runID string) []*storage.RunFeedback {
+	if fs, ok := s.store.(storage.FeedbackStore); ok {
+		out, err := fs.ListFeedback(ctx, runID)
+		if err == nil {
+			if out == nil {
+				return []*storage.RunFeedback{}
+			}
+			return out
+		}
+	}
+	s.feedbackMu.Lock()
+	defer s.feedbackMu.Unlock()
+	if s.feedback[runID] == nil {
+		return []*storage.RunFeedback{}
+	}
+	return s.feedback[runID]
 }
 
 // handleFailures returns the tail of the failures feed (the production

@@ -64,7 +64,7 @@
     },
     {
       "name": "analyst-decides-mitigation",
-      "input": "Execution report from a real run of a Bell-state experiment: ideal counts {'00': 2009, '11': 2087}; noisy counts {'00': 1824, '11': 1881, '01': 198, '10': 193}; fidelity 0.9045; error rate 0.0955. Decision rule: fidelity below 0.95 requires error mitigation. Give your verdict and the concrete mitigation you would request.",
+      "input": "Execution report from a real run of a Bell-state experiment: ideal counts {'00': 2009, '11': 2087}; noisy counts {'00': 1824, '11': 1881, '01': 198, '10': 193}; fidelity 0.9045; error rate 0.0955. Decision rule: fidelity below 0.95 requires error mitigation. Give your verdict and choose ONE concrete mitigation to request: either readout calibration + correction (assignment matrix / least squares), or state explicitly why a different mitigation is strictly better.",
       "expect": { "status": "completed" },
       "judge": {
         "rubric": "The answer must conclude MITIGATION REQUIRED (fidelity 0.9045 < 0.95), report the error rate ~0.0955, and propose readout calibration + correction (assignment matrix / least squares) as the mitigation.",

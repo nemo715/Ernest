@@ -42,10 +42,10 @@ type wsConn struct {
 	s *Server
 	c *websocket.Conn
 
-	writeMu sync.Mutex // guards c.Write
-	mu      sync.Mutex // guards run state
-	running bool
-	cancel  context.CancelFunc
+	writeMu      sync.Mutex // guards c.Write
+	mu           sync.Mutex // guards run state
+	running      bool
+	cancel       context.CancelFunc
 	pendingSteer string // queued steer input (next run input)
 	agent        string // agent of the most recent run (steer target)
 	session      string // session of the most recent run

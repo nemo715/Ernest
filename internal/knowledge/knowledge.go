@@ -44,6 +44,9 @@ type KnowledgeBase struct {
 	Collection string
 	ChunkSize  int
 	ChunkOverlap int
+	// TopK is the default number of chunks retrieved per query when the
+	// caller passes k <= 0 (default 4).
+	TopK int
 
 	// docIDCount is used to build stable chunk ids per document.
 	docIDCount int
@@ -69,6 +72,7 @@ func New(store vector.VectorStore, embedder llm.Embedder, opts ChunkOptions) *Kn
 		Collection:   "ernest_knowledge",
 		ChunkSize:    opts.ChunkSize,
 		ChunkOverlap: opts.ChunkOverlap,
+		TopK:         4,
 	}
 }
 
@@ -137,7 +141,10 @@ func (kb *KnowledgeBase) Query(ctx context.Context, query string, k int) ([]Chun
 		return nil, core.NewError(core.KindKnowledge, "knowledge base has no embedder")
 	}
 	if k <= 0 {
-		k = 4
+		k = kb.TopK
+		if k <= 0 {
+			k = 4
+		}
 	}
 	vecs, err := kb.Embedder.Embed(ctx, []string{query})
 	if err != nil {
