@@ -71,6 +71,6 @@ jobs:
         if: env.OPENROUTER_API_KEY == ''
         run: |
           go run ./cmd/ernest eval \
-            --config _demo/eval-demo/ernest-mock.json \
+            --config .github/ernest-mock.json \
             --scenarios .github/ci-scenarios-mock.json \
             --json

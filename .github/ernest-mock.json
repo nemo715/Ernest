@@ -1,0 +1,15 @@
+{
+  "agents": [
+    {
+      "name": "assistant",
+      "description": "Eval subject agent (mock, deterministic)",
+      "provider": "mock",
+      "model": "mock-1",
+      "instructions": "You are a precise assistant.",
+      "tools": ["calculator", "http_fetch", "now"],
+      "memory": true,
+      "maxIterations": 8
+    }
+  ],
+  "store": { "type": "memory" }
+}
