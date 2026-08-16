@@ -49,6 +49,11 @@ class Agent:
         provider: "mock" (default, keyless), "openai", "compatible"
             (any OpenAI-compatible API, e.g. OpenRouter) or "ollama".
         model: model id; defaults to the provider's demo default.
+        base_url: API endpoint override (``baseUrl``), e.g.
+            ``https://openrouter.ai/api/v1`` for the "compatible"
+            provider; keyless providers can leave it unset.
+        api_key_env: env var holding the API key (``apiKeyEnv``),
+            e.g. ``OPENROUTER_API_KEY``.
         instructions: system instructions.
         tools: built-in tool names (calculator, http_fetch, now, ...).
         tool_sandbox: base directory for the sandboxed file/shell tools
@@ -64,6 +69,8 @@ class Agent:
     name: str
     provider: str = "mock"
     model: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key_env: Optional[str] = None
     instructions: str = ""
     description: str = ""
     tools: List[str] = field(default_factory=list)
@@ -87,6 +94,10 @@ class Agent:
             "provider": provider,
             "model": self.model or ("mock-1" if provider == "mock" else ""),
         }
+        if self.base_url:
+            cfg["baseUrl"] = self.base_url
+        if self.api_key_env:
+            cfg["apiKeyEnv"] = self.api_key_env
         if self.description:
             cfg["description"] = self.description
         if self.instructions:

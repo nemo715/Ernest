@@ -69,6 +69,25 @@ def test_agent_tool_sandbox_and_policy() -> None:
     assert "toolPolicy" not in Agent("plain").to_config()
 
 
+def test_agent_compatible_provider_endpoint() -> None:
+    """Compatible-provider agents carry baseUrl + apiKeyEnv (OpenRouter etc.)."""
+    a = Agent(
+        "assistant",
+        provider="compatible",
+        model="openai/gpt-4o-mini",
+        base_url="https://openrouter.ai/api/v1",
+        api_key_env="OPENROUTER_API_KEY",
+    )
+    cfg = a.to_config()
+    assert cfg["provider"] == "compatible"
+    assert cfg["baseUrl"] == "https://openrouter.ai/api/v1"
+    assert cfg["apiKeyEnv"] == "OPENROUTER_API_KEY"
+    # Optional fields stay absent when unset.
+    plain = Agent("plain", provider="compatible", model="gpt-4o-mini").to_config()
+    assert "baseUrl" not in plain
+    assert "apiKeyEnv" not in plain
+
+
 def test_agent_empty_name_raises() -> None:
     with pytest.raises(ValueError, match="Agent name is required"):
         Agent("").to_config()

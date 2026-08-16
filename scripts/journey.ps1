@@ -160,6 +160,37 @@ $runId = ""
 if ($runText -match '"runId":\s*"([^"]+)"') { $runId = $Matches[1] }
 Log "run id: $runId"
 
+# --- Step 1 live: the same agent on the real provider (OpenRouter) ---
+if ($hasKey) {
+    Step "Step 1 live: ernest run on the real provider (OpenRouter gpt-4o-mini)"
+
+    @'
+{
+  "agents": [
+    {
+      "name": "assistant",
+      "description": "Live agent (OpenRouter)",
+      "provider": "compatible",
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "instructions": "You are a helpful assistant. Use the calculator for arithmetic. Be brief.",
+      "tools": ["calculator"]
+    }
+  ]
+}
+'@ | Out-File -FilePath (Join-Path $d1 "ernest.real.json") -Encoding ascii
+
+    $realRun = Invoke-Native $d1 "ernest run --config ernest.real.json (REAL provider)" {
+        & $ErnestExe run --config ernest.real.json --input "what is 6*7?" --json
+    }
+    $realText = $realRun -join "`n"
+    Check ($realText -match '"status":\s*"completed"') "real-provider run completed"
+    Check ($realText -match "42") "real model answered 6*7 = 42"
+} else {
+    Log "SKIP: no OPENROUTER_API_KEY — real-provider run not attempted"
+}
+
 # ---------------------------------------------------------------------------
 # Step 1b — config-driven teams + workflows (no Go code)
 # ---------------------------------------------------------------------------
@@ -244,6 +275,34 @@ crew = Crew(name="py-crew", tasks=[research, write])
     }
     $pyDocText = $pyDoctor -join "`n"
     Check (($pyDocText -match '"workflows"') -and ($pyDocText -match '"py-crew"')) "python -m ernest doctor validates the compiled crew config"
+
+    if ($hasKey) {
+        Step "Step 1c live: python crew on the real provider (OpenRouter)"
+        $crewLive = @'
+from ernest import Agent, Task, Crew
+
+researcher = Agent("researcher", provider="compatible", model="openai/gpt-4o-mini",
+                   base_url="https://openrouter.ai/api/v1", api_key_env="OPENROUTER_API_KEY",
+                   instructions="You research facts and state them plainly, numbers included.")
+writer = Agent("writer", provider="compatible", model="openai/gpt-4o-mini",
+               base_url="https://openrouter.ai/api/v1", api_key_env="OPENROUTER_API_KEY",
+               instructions="You condense findings into one short sentence, keeping any numbers.")
+research = Task(researcher, "Find the answer to {{input}} and state it.", name="research")
+write = Task(writer, "Condense: {{research}}", name="write", depends_on=["research"])
+crew = Crew(name="py-crew-live", tasks=[research, write])
+'@ | Out-File -FilePath (Join-Path $dPy "crew-live.py") -Encoding ascii
+
+        $pyLive = Invoke-Native $dPy "python -m ernest run crew-live.py --input `"what is 6*7?`" --json (REAL provider)" {
+            $env:ERNEST_BIN = $ErnestExe
+            $env:PYTHONPATH = (Join-Path $repo "python") + [IO.Path]::PathSeparator + $env:PYTHONPATH
+            & python -m ernest run crew-live.py --input "what is 6*7?" --json
+        }
+        $pyLiveText = $pyLive -join "`n"
+        Check ($pyLiveText -match '"status":\s*"completed"') "python crew completed on the real provider"
+        Check ($pyLiveText -match "42") "python crew answer carried the researched number (42)"
+    } else {
+        Log "SKIP: no OPENROUTER_API_KEY — python live crew not attempted"
+    }
 } else {
     Log "SKIP: no python on PATH — python -m ernest not attempted"
 }
@@ -363,6 +422,26 @@ $evalOut = Invoke-Native $d1 "ernest eval --config ernest.json --scenarios scena
 $evalText = $evalOut -join "`n"
 Check ($evalText -match '"failed":\s*0') "eval: 0 failed scenarios"
 Check ($evalText -match '"passed":\s*2') "eval: 2 passed scenarios"
+
+if ($hasKey) {
+    Step "Step 2 live: ernest eval on the real provider (OpenRouter)"
+    $liveScen = Join-Path $d1 "scenarios-live.json"
+    @'
+{
+  "scenarios": [
+    { "name": "live-math", "input": "what is 6*7?", "expect": { "status": "completed", "outputContains": ["42"] } },
+    { "name": "live-capital", "input": "What is the capital of France?", "expect": { "status": "completed", "outputContains": ["Paris"] } }
+  ]
+}
+'@ | Out-File -FilePath $liveScen -Encoding ascii
+
+    $liveEval = Invoke-Native $d1 "ernest eval --config ernest.real.json --scenarios scenarios-live.json --json (REAL provider)" {
+        & $ErnestExe eval --config ernest.real.json --scenarios scenarios-live.json --json
+    }
+    $liveEvalText = $liveEval -join "`n"
+    Check ($liveEvalText -match '"failed":\s*0') "live eval: 0 failed scenarios"
+    Check ($liveEvalText -match '"passed":\s*2') "live eval: 2 passed scenarios"
+}
 
 # ---------------------------------------------------------------------------
 # Step 3 — knowledge template + real-provider RAG
@@ -519,6 +598,55 @@ Check ($wfSSEText -match 'server pipelines') "workflow run SSE carried the input
 $missTeam = curl.exe -s -m 10 -o NUL -w "%{http_code}" -X POST -H "Content-Type: application/json" -d "@$teamBody" "http://127.0.0.1:9092/api/teams/ghost/run"
 Check ($missTeam -eq "404") "unknown team run returns 404"
 if ($p5b -and -not $p5b.HasExited) { Stop-Process -Id $p5b.Id -Force }
+
+if ($hasKey) {
+    Step "Step 5b live: teams + workflows SSE on the real provider (OpenRouter)"
+
+    @'
+{
+  "agents": [
+    { "name": "lead", "provider": "compatible", "model": "openai/gpt-4o-mini", "baseUrl": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY", "instructions": "You coordinate the team." },
+    { "name": "researcher", "provider": "compatible", "model": "openai/gpt-4o-mini", "baseUrl": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY", "instructions": "You research facts and state them plainly, numbers included." },
+    { "name": "writer", "provider": "compatible", "model": "openai/gpt-4o-mini", "baseUrl": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY", "instructions": "You condense findings into one short sentence, keeping any numbers." }
+  ],
+  "teams": [
+    { "name": "editorial", "leader": "lead", "members": ["researcher", "writer"], "process": "sequential" }
+  ],
+  "workflows": [
+    {
+      "name": "pipeline",
+      "steps": [
+        { "name": "research", "agent": "researcher", "prompt": "Find the answer to {{input}} and state it." },
+        { "name": "write", "agent": "writer", "prompt": "Condense: {{research}}", "dependsOn": ["research"] }
+      ]
+    }
+  ]
+}
+'@ | Out-File -FilePath (Join-Path $dOrch "ernest.real.json") -Encoding ascii
+
+    $srv5cOut = Join-Path $Scratch "play-9093.out.log"
+    $srv5cErr = Join-Path $Scratch "play-9093.err.log"
+    $p5c = Start-Process -FilePath $ErnestExe -ArgumentList "playground", "--config", "ernest.real.json", "--port", "9093" `
+        -WorkingDirectory $dOrch -RedirectStandardOutput $srv5cOut -RedirectStandardError $srv5cErr -PassThru -WindowStyle Hidden
+    Log "playground (live orchestration) pid $($p5c.Id) on :9093"
+    Check (Wait-Healthy "http://127.0.0.1:9093/healthz" 90) "live playground healthz up"
+
+    $teamBody2 = Join-Path $Scratch "team-live-body.json"
+    [System.IO.File]::WriteAllText($teamBody2, '{"input":"what is 6*7?"}', (New-Object System.Text.UTF8Encoding($false)))
+    $teamSSE2 = curl.exe -s -m 180 -X POST -H "Content-Type: application/json" -d "@$teamBody2" "http://127.0.0.1:9093/api/teams/editorial/run"
+    $teamSSE2Text = $teamSSE2 -join "`n"
+    Check ($teamSSE2Text -match '"status":\s*"completed"') "live team run completed over SSE"
+    Check ($teamSSE2Text -match "42") "live team output carried the researched number (42)"
+
+    $wfBody2 = Join-Path $Scratch "wf-live-body.json"
+    [System.IO.File]::WriteAllText($wfBody2, '{"input":"what is 6*7?"}', (New-Object System.Text.UTF8Encoding($false)))
+    $wfSSE2 = curl.exe -s -m 180 -X POST -H "Content-Type: application/json" -d "@$wfBody2" "http://127.0.0.1:9093/api/workflows/pipeline/run"
+    $wfSSE2Text = $wfSSE2 -join "`n"
+    Check ($wfSSE2Text -match '"status":\s*"completed"') "live workflow run completed over SSE"
+    Check ($wfSSE2Text -match "42") "live workflow state carried the researched number (42)"
+
+    if ($p5c -and -not $p5c.HasExited) { Stop-Process -Id $p5c.Id -Force }
+}
 
 # ---------------------------------------------------------------------------
 # Step 6 — doctor clean at every stage
