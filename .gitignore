@@ -38,6 +38,9 @@ web/*.tsbuildinfo
 # Scratch
 _demo/
 .benchmarks/
+.journey-live*/
+.tpp-check/
+.syntest/
 test-out.txt
 chat.json
 realtime/playground.*

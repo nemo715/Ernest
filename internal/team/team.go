@@ -1,9 +1,13 @@
 // Package team implements multi-agent teams: a leader agent delegates
-// tasks to specialist members through a built-in delegate tool.
+// tasks to specialist members through a built-in delegate tool, or — in
+// sequential process mode — members run one after another with each
+// member's output feeding the next (no leader model call).
 package team
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -12,21 +16,29 @@ import (
 	"github.com/nemo715/Ernest/internal/core"
 )
 
-// Team orchestrates a leader and its members. The leader keeps full
-// autonomy: it decides when (and to whom) to delegate, using the
-// automatically injected `delegate` tool.
+// Team orchestrates a leader and its members.
+//
+// Process "hierarchical" (default): the leader keeps full autonomy and
+// decides when (and to whom) to delegate, using the automatically
+// injected `delegate` tool.
+//
+// Process "sequential": members run in declaration order; each member's
+// output becomes the next member's input. Deterministic, no leader call.
 type Team struct {
-	Name         string
-	Description  string
-	Leader       *agent.Agent
-	Members      []*agent.Agent
-	Instructions string // extra context appended to the leader's instructions
+	Name          string
+	Description   string
+	Leader        *agent.Agent
+	Members       []*agent.Agent
+	Instructions  string // extra context appended to the leader's instructions
 	MaxIterations int
+	// Process selects the execution model: "hierarchical" (default) or
+	// "sequential".
+	Process string
 }
 
 // New builds a team from a leader and members.
 func New(name string, leader *agent.Agent, members ...*agent.Agent) *Team {
-	return &Team{Name: name, Leader: leader, Members: members, MaxIterations: 8}
+	return &Team{Name: name, Leader: leader, Members: members, MaxIterations: 8, Process: "hierarchical"}
 }
 
 // RunOptions mirror agent.RunOptions.
@@ -120,6 +132,9 @@ func (t *Team) leaderAgent() (*agent.Agent, error) {
 
 // Chat runs the team synchronously.
 func (t *Team) Chat(ctx context.Context, input string, opts ...RunOptions) (*core.RunResult, error) {
+	if strings.EqualFold(t.Process, "sequential") {
+		return t.runSequential(ctx, input, nil)
+	}
 	leader, err := t.leaderAgent()
 	if err != nil {
 		return nil, err
@@ -129,6 +144,14 @@ func (t *Team) Chat(ctx context.Context, input string, opts ...RunOptions) (*cor
 
 // Stream runs the team and returns an event channel.
 func (t *Team) Stream(ctx context.Context, input string, opts ...RunOptions) (<-chan core.RunEvent, error) {
+	if strings.EqualFold(t.Process, "sequential") {
+		ch := make(chan core.RunEvent, 256)
+		go func() {
+			defer close(ch)
+			_, _ = t.runSequential(ctx, input, func(ev core.RunEvent) { ch <- ev })
+		}()
+		return ch, nil
+	}
 	leader, err := t.leaderAgent()
 	if err != nil {
 		return nil, err
@@ -143,4 +166,68 @@ func (t *Team) Resume(ctx context.Context, decision core.ApprovalDecision) (*cor
 		return nil, err
 	}
 	return leader.Resume(ctx, decision)
+}
+
+// runSequential executes the members in order, chaining outputs: each
+// member's output becomes the next member's input. Events follow the
+// same protocol as a normal run (delegate.start/end around each member,
+// a final run.complete carrying the team result).
+func (t *Team) runSequential(ctx context.Context, input string, emit func(core.RunEvent)) (*core.RunResult, error) {
+	if len(t.Members) == 0 {
+		return nil, core.NewError(core.KindAgent, "team "+t.Name+" has no members")
+	}
+	runID := newID("team")
+	emitEv := func(ev core.RunEvent) {
+		if emit != nil {
+			emit(ev)
+		}
+	}
+	emitEv(core.RunEvent{Type: core.EventRunStart, RunID: runID, Agent: t.Name})
+
+	prompt := input
+	var last *core.RunResult
+	for _, m := range t.Members {
+		if m == nil || m.Name == "" {
+			continue
+		}
+		emitEv(core.RunEvent{Type: core.EventDelegateStart, RunID: runID, Agent: m.Name, Data: json.RawMessage(fmt.Sprintf(`{"task":%q}`, prompt))})
+		res, err := m.Chat(ctx, prompt, RunOptions{SessionID: runID + ":member:" + m.Name})
+		if err != nil {
+			emitEv(core.RunEvent{Type: core.EventRunError, RunID: runID, Agent: m.Name, Error: err.Error()})
+			return nil, err
+		}
+		emitEv(core.RunEvent{Type: core.EventDelegateEnd, RunID: runID, Agent: m.Name, Data: json.RawMessage(fmt.Sprintf(`{"task":%q,"output":%q}`, prompt, res.Output))})
+		prompt = res.Output
+		last = res
+	}
+	if last == nil {
+		return nil, core.NewError(core.KindAgent, "team "+t.Name+" has no members")
+	}
+	result := &core.RunResult{
+		RunID:      last.RunID,
+		Status:     last.Status,
+		Output:     last.Output,
+		Error:      last.Error,
+		DurationMS: last.DurationMS,
+		Metadata:   map[string]any{"team": t.Name, "process": "sequential", "members": memberNames(t.Members)},
+	}
+	emitEv(core.RunEvent{Type: core.EventRunComplete, RunID: runID, Agent: t.Name, Result: result})
+	return result, nil
+}
+
+// memberNames returns the names of the team members, in declaration order.
+func memberNames(members []*agent.Agent) []string {
+	names := make([]string, 0, len(members))
+	for _, m := range members {
+		if m != nil && m.Name != "" {
+			names = append(names, m.Name)
+		}
+	}
+	return names
+}
+
+func newID(prefix string) string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return prefix + "_" + hex.EncodeToString(b)
 }

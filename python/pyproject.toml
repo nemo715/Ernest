@@ -4,11 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ernest"
-version = "0.1.0"
-description = "Python SDK for ernest — a fast multi-agent framework (Go core). Sync + async clients with SSE streaming and typed HITL approvals."
-readme = { text = "Python SDK for ernest. See PLAN.md / USERFLOW.md at the repository root for the API contract.", content-type = "text/markdown" }
+version = "0.2.0"
+description = "ernest — author multi-agent crews in Python, run them on a fast Go engine. DSL (Agent/Task/Crew/Team) + sync/async SDK with SSE streaming and typed HITL approvals."
+readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
+keywords = ["agents", "multi-agent", "llm", "sdk", "sse", "orchestration", "crews"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/nemo715/Ernest"
+Documentation = "https://github.com/nemo715/Ernest/tree/main/docs"
+Source = "https://github.com/nemo715/Ernest"
+Tracker = "https://github.com/nemo715/Ernest/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

@@ -392,6 +392,48 @@ class AgentInfo:
 
 
 @dataclass
+class TeamInfo:
+    """Team metadata served by GET /api/teams."""
+
+    name: str = ""
+    description: str = ""
+    leader: str = ""
+    members: List[str] = field(default_factory=list)
+    process: str = "hierarchical"
+
+    @classmethod
+    def from_dict(cls, d: Any) -> Optional["TeamInfo"]:
+        if not isinstance(d, dict):
+            return None
+        return cls(
+            name=d.get("name", ""),
+            description=d.get("description", "") or "",
+            leader=d.get("leader", "") or "",
+            members=list(d.get("members") or []),
+            process=d.get("process", "hierarchical") or "hierarchical",
+        )
+
+
+@dataclass
+class WorkflowInfo:
+    """Workflow metadata served by GET /api/workflows."""
+
+    name: str = ""
+    description: str = ""
+    steps: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: Any) -> Optional["WorkflowInfo"]:
+        if not isinstance(d, dict):
+            return None
+        return cls(
+            name=d.get("name", ""),
+            description=d.get("description", "") or "",
+            steps=list(d.get("steps") or []),
+        )
+
+
+@dataclass
 class SessionInfo:
     """Session summary served by GET /api/sessions."""
 

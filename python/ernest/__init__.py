@@ -21,6 +21,7 @@ Usage::
 
 from .async_client import AsyncClient
 from .client import Client, DEFAULT_BASE_URL
+from .dsl import Agent, Crew, Guard, Task, Team
 from .errors import (
     APIError,
     AgentError,
@@ -83,19 +84,27 @@ from .types import (
     RunTrace,
     Session,
     SessionInfo,
+    TeamInfo,
     ToolCall,
     ToolResult,
     Usage,
     TraceSpan,
     RunMetrics,
+    WorkflowInfo,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Client",
     "AsyncClient",
     "DEFAULT_BASE_URL",
+    # Authoring DSL (compiles to ernest.json; runs on the Go engine).
+    "Agent",
+    "Team",
+    "Task",
+    "Guard",
+    "Crew",
     "RunEvent",
     "RunResult",
     "RunTrace",
@@ -108,6 +117,8 @@ __all__ = [
     "ApprovalRequest",
     "Usage",
     "AgentInfo",
+    "TeamInfo",
+    "WorkflowInfo",
     "Session",
     "SessionInfo",
     "ErnestError",

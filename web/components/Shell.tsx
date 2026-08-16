@@ -25,6 +25,9 @@ const NAV = [
   { section: "Configure", links: [
     { href: "/agents", label: "Agents" },
   ]},
+  { section: "Learn", links: [
+    { href: "/docs", label: "Docs" },
+  ]},
 ];
 
 export function Shell({ children }: { children: ReactNode }) {

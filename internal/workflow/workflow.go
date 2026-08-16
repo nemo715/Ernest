@@ -15,6 +15,7 @@ import (
 
 	"github.com/nemo715/Ernest/internal/agent"
 	"github.com/nemo715/Ernest/internal/core"
+	"github.com/nemo715/Ernest/internal/eval"
 )
 
 // Step is one node in a workflow graph.
@@ -348,6 +349,168 @@ func containsStr(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// GuardSpec is a declarative LLM-judged quality gate on a step output:
+// the step's agent provider scores the output against the rubric
+// (0.0..1.0) and the step fails when the score is below MinScore
+// (default 0.7). Requires a real (or scripted) model — the mock
+// provider cannot judge.
+type GuardSpec struct {
+	Rubric   string
+	MinScore float64
+}
+
+// StepSpec describes one declarative workflow step: a prompt run through
+// a named agent whose output is stored in the shared state under the
+// step name. "{{name}}" (or "{{input}}") placeholders in Prompt are
+// replaced with state values before the agent call.
+type StepSpec struct {
+	Name      string
+	Agent     string
+	Prompt    string
+	DependsOn []string
+	Retries   int
+	Guard     *GuardSpec
+}
+
+// Build constructs a workflow from declarative step specs and a named
+// agent map. It validates step names, dependencies and agent references
+// up front (including cycle detection), so config loading fails fast
+// instead of at run time.
+func Build(name string, specs []StepSpec, agents map[string]*agent.Agent, maxRetries int) (*Workflow, error) {
+	if name == "" {
+		return nil, core.NewError(core.KindValidation, "workflow name is required")
+	}
+	if len(specs) == 0 {
+		return nil, core.NewError(core.KindValidation, "workflow "+name+" has no steps")
+	}
+	byName := map[string]bool{}
+	for _, sp := range specs {
+		if sp.Name == "" {
+			return nil, core.NewError(core.KindValidation, "workflow step without name")
+		}
+		if byName[sp.Name] {
+			return nil, core.NewError(core.KindValidation, "duplicate step "+sp.Name)
+		}
+		byName[sp.Name] = true
+		if sp.Agent == "" {
+			return nil, core.NewError(core.KindValidation, fmt.Sprintf("step %q: agent is required", sp.Name))
+		}
+		if agents != nil && agents[sp.Agent] == nil {
+			return nil, core.NewError(core.KindValidation, fmt.Sprintf("step %q: unknown agent %q", sp.Name, sp.Agent))
+		}
+		if sp.Guard != nil && sp.Guard.Rubric == "" {
+			return nil, core.NewError(core.KindValidation, fmt.Sprintf("step %q: guard requires a rubric", sp.Name))
+		}
+	}
+	for _, sp := range specs {
+		for _, dep := range sp.DependsOn {
+			if !byName[dep] {
+				return nil, core.NewError(core.KindValidation, fmt.Sprintf("step %q depends on unknown step %q", sp.Name, dep))
+			}
+		}
+	}
+	if cycle, ok := firstCycle(specs); ok {
+		return nil, core.NewError(core.KindValidation, "workflow dependency cycle: "+strings.Join(cycle, " -> "))
+	}
+
+	wf := &Workflow{Name: name, Agents: agents, MaxRetries: maxRetries}
+	for _, sp := range specs {
+		sp := sp
+		step := &Step{Name: sp.Name, DependsOn: sp.DependsOn, Retries: sp.Retries}
+		step.Run = func(ctx *StepContext) error {
+			ag := ctx.Agent(sp.Agent)
+			if ag == nil {
+				return core.NewError(core.KindAgent, fmt.Sprintf("step %q: agent %q not found", sp.Name, sp.Agent))
+			}
+			prompt := interpolate(sp.Prompt, ctx)
+			if prompt == "" {
+				prompt = fmt.Sprintf("%v", ctx.Input())
+			}
+			res, err := ag.Chat(ctx.Ctx, prompt, agent.RunOptions{SessionID: ctx.RunID + ":step:" + sp.Name})
+			if err != nil {
+				return err
+			}
+			ctx.Set(sp.Name, res.Output)
+			if sp.Guard != nil {
+				verdict, jerr := eval.Judge(ctx.Ctx, ag.Provider, prompt, sp.Guard.Rubric, res.Output, "")
+				if jerr != nil {
+					return jerr
+				}
+				minScore := sp.Guard.MinScore
+				if minScore <= 0 {
+					minScore = 0.7
+				}
+				if verdict.Score < minScore {
+					return core.NewError(core.KindValidation,
+						fmt.Sprintf("step %q guard score %.2f < min %.2f: %s", sp.Name, verdict.Score, minScore, verdict.Reason))
+				}
+			}
+			return nil
+		}
+		wf.Steps = append(wf.Steps, step)
+	}
+	return wf, nil
+}
+
+// interpolate replaces {{key}} placeholders with string state values.
+func interpolate(prompt string, ctx *StepContext) string {
+	if prompt == "" {
+		return prompt
+	}
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	for k, v := range ctx.State {
+		if s, ok := v.(string); ok {
+			prompt = strings.ReplaceAll(prompt, "{{"+k+"}}", s)
+		}
+	}
+	return prompt
+}
+
+// firstCycle returns the first dependency cycle found among the steps
+// (nil, false when the graph is acyclic).
+func firstCycle(specs []StepSpec) ([]string, bool) {
+	indeg := map[string]int{}
+	deps := map[string][]string{}
+	names := make([]string, 0, len(specs))
+	for _, sp := range specs {
+		names = append(names, sp.Name)
+		indeg[sp.Name] = len(sp.DependsOn)
+		for _, d := range sp.DependsOn {
+			deps[d] = append(deps[d], sp.Name)
+		}
+	}
+	// Kahn's algorithm: a node left unprocessed belongs to a cycle.
+	queue := []string{}
+	for _, n := range names {
+		if indeg[n] == 0 {
+			queue = append(queue, n)
+		}
+	}
+	processed := 0
+	for len(queue) > 0 {
+		n := queue[0]
+		queue = queue[1:]
+		processed++
+		for _, next := range deps[n] {
+			indeg[next]--
+			if indeg[next] == 0 {
+				queue = append(queue, next)
+			}
+		}
+	}
+	if processed == len(names) {
+		return nil, false
+	}
+	var cycle []string
+	for _, n := range names {
+		if indeg[n] > 0 {
+			cycle = append(cycle, n)
+		}
+	}
+	return cycle, true
 }
 
 func newID(prefix string) string {

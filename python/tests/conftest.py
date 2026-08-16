@@ -26,6 +26,7 @@ import sys
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlsplit
 
@@ -38,6 +39,20 @@ AGENT: Dict[str, Any] = {
     "provider": "mock",
     "tools": ["calculator", "send_email", "now"],
 }
+
+TEAMS: List[Dict[str, Any]] = [
+    {
+        "name": "editorial",
+        "description": "content team",
+        "leader": "assistant",
+        "members": ["researcher", "writer"],
+        "process": "hierarchical",
+    }
+]
+
+WORKFLOWS: List[Dict[str, Any]] = [
+    {"name": "pipeline", "description": "two-step DAG", "steps": ["research", "write"]}
+]
 
 
 class _QuietServer(ThreadingHTTPServer):
@@ -113,6 +128,10 @@ class MockErnestHandler(BaseHTTPRequestHandler):
             self._json(200, {"status": "ok", "agents": 1})
         elif path == "/api/agents":
             self._json(200, [AGENT])
+        elif path == "/api/teams":
+            self._json(200, TEAMS)
+        elif path == "/api/workflows":
+            self._json(200, WORKFLOWS)
         elif path == "/api/sessions":
             out = [
                 {
@@ -165,7 +184,8 @@ class MockErnestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         body = self._read_body()
-        if self._path() == "/api/chat":
+        path = self._path()
+        if path == "/api/chat":
             if body.get("agent") != AGENT["name"]:
                 self._json(404, {"error": f"unknown agent {body.get('agent')}"})
                 return
@@ -173,6 +193,24 @@ class MockErnestHandler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "input is required"})
                 return
             self._sse(self._chat_events(body, resume=None))
+        elif path.startswith("/api/teams/") and path.endswith("/run"):
+            name = unquote(path[len("/api/teams/") : -len("/run")])
+            if not any(t["name"] == name for t in TEAMS):
+                self._json(404, {"error": f"unknown team {name}"})
+                return
+            if not body.get("input"):
+                self._json(400, {"error": "input is required"})
+                return
+            self._sse(self._team_events(name, body.get("input", "")))
+        elif path.startswith("/api/workflows/") and path.endswith("/run"):
+            name = unquote(path[len("/api/workflows/") : -len("/run")])
+            if not any(w["name"] == name for w in WORKFLOWS):
+                self._json(404, {"error": f"unknown workflow {name}"})
+                return
+            if not body.get("input"):
+                self._json(400, {"error": "input is required"})
+                return
+            self._sse(self._workflow_events(name, body.get("input", "")))
         elif self._path() == "/api/approve":
             approval_id = body.get("approvalId", "")
             if approval_id not in self.approval_to_session:
@@ -187,6 +225,43 @@ class MockErnestHandler(BaseHTTPRequestHandler):
             self._sse(self._chat_events({"agent": AGENT["name"], "sessionId": session_id}, resume=resume))
         else:
             self._json(404, {"error": f"no route: POST {self.path}"})
+
+    # -- team/workflow flows --------------------------------------------
+
+    def _team_events(self, name: str, input_text: str) -> List[dict]:
+        run_id = _uid("run")
+        now = _now()
+        events: List[dict] = [
+            {"type": "run.start", "runId": run_id, "agent": name, "data": {"input": input_text}},
+            {"type": "delegate.start", "runId": run_id, "agent": "researcher", "data": {"task": input_text}},
+            {"type": "delegate.end", "runId": run_id, "agent": "researcher", "data": {"task": input_text, "output": "findings"}},
+            {"type": "run.complete", "runId": run_id, "agent": name, "result": {
+                "runId": run_id,
+                "status": "completed",
+                "output": "synthesised answer",
+                "durationMs": 210,
+                "metadata": {"team": name, "process": "hierarchical", "members": 2},
+            }},
+        ]
+        return events
+
+    def _workflow_events(self, name: str, input_text: str) -> List[dict]:
+        run_id = _uid("run")
+        now = _now()
+        return [
+            {"type": "run.start", "runId": run_id, "agent": name, "data": {"input": input_text}},
+            {"type": "step.start", "runId": run_id, "agent": name, "step": "research"},
+            {"type": "step.end", "runId": run_id, "agent": name, "step": "research"},
+            {"type": "step.start", "runId": run_id, "agent": name, "step": "write"},
+            {"type": "step.end", "runId": run_id, "agent": name, "step": "write"},
+            {"type": "run.complete", "runId": run_id, "agent": name, "result": {
+                "runId": run_id,
+                "status": "completed",
+                "output": '{"input": "' + input_text + '", "research": "r", "write": "w"}',
+                "durationMs": 310,
+                "metadata": {"workflow": name, "steps": 2},
+            }},
+        ]
 
     # -- chat flow ------------------------------------------------------
 
@@ -474,3 +549,18 @@ def _clean_state(mock_server: ThreadingHTTPServer) -> None:
 def base_url(mock_server: ThreadingHTTPServer) -> str:
     host, port = mock_server.server_address
     return f"http://{host}:{port}"
+
+
+@pytest.fixture(scope="session")
+def ernest_bin() -> str:
+    """Path to the built ernest binary (repo root), or skip the test.
+
+    CI and local dev build it first: ``go build -o ernest ./cmd/ernest``.
+    Tests that shell out to the real engine require it; everything else
+    runs without it.
+    """
+    repo = Path(__file__).resolve().parents[2]
+    for candidate in (repo / "ernest.exe", repo / "ernest"):
+        if candidate.is_file():
+            return str(candidate)
+    pytest.skip("ernest binary not built (go build -o ernest ./cmd/ernest)")

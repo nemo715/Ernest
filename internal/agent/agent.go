@@ -52,6 +52,9 @@ type Agent struct {
 	RequireApprovalTools []string // tool names that always pause for HITL
 	RedactPatterns     []string   // regexes; matches are replaced in user input
 	RedactReplacement  string     // default "[REDACTED]"
+	// ToolSandbox is the agent's configured sandbox base directory for
+	// the file/shell tool packs (empty means those tools refuse to run).
+	ToolSandbox string
 
 	// approvalMu guards approvalSessions (approval id -> session id).
 	approvalMu       sync.Mutex

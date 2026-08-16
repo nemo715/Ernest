@@ -32,6 +32,8 @@ from .types import (
     RunTrace,
     Session,
     SessionInfo,
+    TeamInfo,
+    WorkflowInfo,
 )
 
 DEFAULT_BASE_URL = "http://127.0.0.1:9090"
@@ -172,6 +174,42 @@ class Client:
         """GET /api/agents — available agents."""
         data = self._json("GET", "/api/agents") or []
         return [a for a in (AgentInfo.from_dict(d) for d in data) if a is not None]
+
+    # ------------------------------------------------------------------
+    # Teams + workflows
+    # ------------------------------------------------------------------
+
+    def list_teams(self) -> List[TeamInfo]:
+        """GET /api/teams — config-declared teams."""
+        data = self._json("GET", "/api/teams") or []
+        return [t for t in (TeamInfo.from_dict(d) for d in data) if t is not None]
+
+    def stream_team(self, name: str, input: str) -> Iterator[RunEvent]:
+        """Run a config-declared team; yields its events (delegate.start/
+        delegate.end around member calls, then run.complete)."""
+        yield from self._stream(
+            "POST", f"/api/teams/{urllib.parse.quote(name, safe='')}/run", {"input": input}
+        )
+
+    def run_team(self, name: str, input: str) -> RunResult:
+        """Run a config-declared team and return its final result."""
+        return _collect_result(self.stream_team(name, input))
+
+    def list_workflows(self) -> List[WorkflowInfo]:
+        """GET /api/workflows — config-declared workflows."""
+        data = self._json("GET", "/api/workflows") or []
+        return [w for w in (WorkflowInfo.from_dict(d) for d in data) if w is not None]
+
+    def stream_workflow(self, name: str, input: str) -> Iterator[RunEvent]:
+        """Run a config-declared workflow; yields step.start/step.end
+        events and the final run.complete (output = shared state JSON)."""
+        yield from self._stream(
+            "POST", f"/api/workflows/{urllib.parse.quote(name, safe='')}/run", {"input": input}
+        )
+
+    def run_workflow(self, name: str, input: str) -> RunResult:
+        """Run a config-declared workflow and return its final result."""
+        return _collect_result(self.stream_workflow(name, input))
 
     def list_sessions(self, agent: Optional[str] = None) -> List[SessionInfo]:
         """GET /api/sessions — session summaries (optionally filtered)."""

@@ -19,11 +19,15 @@ from ernest import (
 from ernest.types import (
     EVENT_APPROVAL_REQUESTED,
     EVENT_APPROVAL_RESOLVED,
+    EVENT_DELEGATE_END,
+    EVENT_DELEGATE_START,
     EVENT_MESSAGE_COMPLETE,
     EVENT_MESSAGE_DELTA,
     EVENT_RUN_COMPLETE,
     EVENT_RUN_METRICS,
     EVENT_RUN_START,
+    EVENT_STEP_END,
+    EVENT_STEP_START,
     EVENT_TOOL_CALL,
     EVENT_TOOL_RESULT,
     EVENT_TRACE_SPAN,
@@ -325,3 +329,104 @@ def test_stream_without_complete_raises_protocol_error() -> None:
     fake = FakeClient("http://127.0.0.1:1")
     with pytest.raises(SSEProtocolError):
         fake.chat("assistant", "hello")
+
+
+# ---------------------------------------------------------------------------
+# Teams + workflows (config-driven orchestration)
+# ---------------------------------------------------------------------------
+
+
+def test_list_teams(base_url: str) -> None:
+    teams = Client(base_url).list_teams()
+    assert len(teams) == 1
+    team = teams[0]
+    assert team.name == "editorial"
+    assert team.description == "content team"
+    assert team.leader == "assistant"
+    assert team.members == ["researcher", "writer"]
+    assert team.process == "hierarchical"
+
+
+def test_list_workflows(base_url: str) -> None:
+    workflows = Client(base_url).list_workflows()
+    assert len(workflows) == 1
+    workflow = workflows[0]
+    assert workflow.name == "pipeline"
+    assert workflow.description == "two-step DAG"
+    assert workflow.steps == ["research", "write"]
+
+
+def test_stream_team_event_sequence(base_url: str) -> None:
+    types = [ev.type for ev in Client(base_url).stream_team("editorial", "summarize X")]
+    assert types == [
+        EVENT_RUN_START,
+        EVENT_DELEGATE_START,
+        EVENT_DELEGATE_END,
+        EVENT_RUN_COMPLETE,
+    ]
+
+
+def test_team_delegate_events_carry_payload(base_url: str) -> None:
+    events = list(Client(base_url).stream_team("editorial", "summarize X"))
+    start = next(ev for ev in events if ev.type == EVENT_DELEGATE_START)
+    end = next(ev for ev in events if ev.type == EVENT_DELEGATE_END)
+    assert start.data == {"task": "summarize X"}
+    assert end.data == {"task": "summarize X", "output": "findings"}
+
+
+def test_run_team_returns_result(base_url: str) -> None:
+    result = Client(base_url).run_team("editorial", "summarize X")
+    assert result.completed
+    assert result.output == "synthesised answer"
+    assert result.metadata == {"team": "editorial", "process": "hierarchical", "members": 2}
+
+
+def test_stream_workflow_event_sequence(base_url: str) -> None:
+    types = [ev.type for ev in Client(base_url).stream_workflow("pipeline", "topic")]
+    assert types == [
+        EVENT_RUN_START,
+        EVENT_STEP_START,
+        EVENT_STEP_END,
+        EVENT_STEP_START,
+        EVENT_STEP_END,
+        EVENT_RUN_COMPLETE,
+    ]
+
+
+def test_workflow_step_events_carry_names(base_url: str) -> None:
+    events = list(Client(base_url).stream_workflow("pipeline", "topic"))
+    steps = [ev.step for ev in events if ev.type == EVENT_STEP_START]
+    assert steps == ["research", "write"]
+
+
+def test_run_workflow_returns_result(base_url: str) -> None:
+    result = Client(base_url).run_workflow("pipeline", "topic")
+    assert result.completed
+    assert '"research"' in result.output
+    assert result.metadata == {"workflow": "pipeline", "steps": 2}
+
+
+def test_run_unknown_team_returns_404(base_url: str) -> None:
+    with pytest.raises(NotFoundError) as exc_info:
+        Client(base_url).run_team("ghost", "x")
+    assert exc_info.value.status == 404
+    assert "unknown team ghost" in exc_info.value.message
+
+
+def test_run_unknown_workflow_returns_404(base_url: str) -> None:
+    with pytest.raises(NotFoundError) as exc_info:
+        Client(base_url).run_workflow("ghost", "x")
+    assert exc_info.value.status == 404
+    assert "unknown workflow ghost" in exc_info.value.message
+
+
+def test_run_team_missing_input_returns_400(base_url: str) -> None:
+    with pytest.raises(BadRequestError):
+        Client(base_url).run_team("editorial", "")
+
+
+def test_team_name_url_quoting(base_url: str) -> None:
+    """Names with spaces/slashes are percent-quoted (the mock decodes the
+    path, so the request reaches the 404 branch instead of a URL error)."""
+    with pytest.raises(NotFoundError):
+        Client(base_url).run_team("team/with spaces", "x")

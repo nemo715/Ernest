@@ -23,6 +23,8 @@ import (
 	"github.com/nemo715/Ernest/internal/core"
 	"github.com/nemo715/Ernest/internal/eval"
 	"github.com/nemo715/Ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/team"
+	"github.com/nemo715/Ernest/internal/workflow"
 )
 
 // Options configures the server.
@@ -41,6 +43,48 @@ type Options struct {
 	// into regression scenarios. The record carries the user input, the
 	// run error and every tool call/result observed during the run.
 	FailuresPath string
+	// Teams are declarative multi-agent teams built from the server's
+	// (audit-wrapped) agents and served at /api/teams. The CLI passes
+	// its config teams here.
+	Teams []TeamSpec
+	// Workflows are declarative step DAGs over the server's agents,
+	// served at /api/workflows.
+	Workflows []WorkflowSpec
+}
+
+// TeamSpec describes one team served at /api/teams.
+type TeamSpec struct {
+	Name          string   `json:"name"`
+	Description   string   `json:"description,omitempty"`
+	Leader        string   `json:"leader"`
+	Members       []string `json:"members"`
+	Process       string   `json:"process,omitempty"` // hierarchical (default) | sequential
+	MaxIterations int      `json:"maxIterations,omitempty"`
+	Instructions  string   `json:"instructions,omitempty"`
+}
+
+// GuardSpec is a declarative LLM-judged quality gate on a step output.
+type GuardSpec struct {
+	Rubric   string  `json:"rubric"`
+	MinScore float64 `json:"minScore,omitempty"`
+}
+
+// WorkflowStepSpec describes one workflow step.
+type WorkflowStepSpec struct {
+	Name      string     `json:"name"`
+	Agent     string     `json:"agent"`
+	Prompt    string     `json:"prompt,omitempty"`
+	DependsOn []string   `json:"dependsOn,omitempty"`
+	Retries   int        `json:"retries,omitempty"`
+	Guard     *GuardSpec `json:"guard,omitempty"`
+}
+
+// WorkflowSpec describes one step DAG served at /api/workflows.
+type WorkflowSpec struct {
+	Name        string             `json:"name"`
+	Description string             `json:"description,omitempty"`
+	Steps       []WorkflowStepSpec `json:"steps"`
+	MaxRetries  int                `json:"maxRetries,omitempty"`
 }
 
 // Server is the HTTP API. Create with New; mount Handler() anywhere.
@@ -59,6 +103,10 @@ type Server struct {
 	// store does not implement storage.FeedbackStore).
 	feedbackMu sync.Mutex
 	feedback   map[string][]*storage.RunFeedback
+
+	// Config-declared orchestrations, built from s.agents in New.
+	teams     map[string]*team.Team
+	workflows map[string]*workflow.Workflow
 
 	// Failures feed: per-run event buffer flushed to the JSONL file on
 	// run.complete (failed status). Only used when FailuresPath is set.
@@ -144,8 +192,80 @@ func New(opts Options) (*Server, error) {
 		}
 		s.agents[a.Name] = wrapped
 	}
+	s.teams = map[string]*team.Team{}
+	for _, spec := range opts.Teams {
+		t, err := s.buildTeam(spec)
+		if err != nil {
+			return nil, err
+		}
+		s.teams[spec.Name] = t
+	}
+	s.workflows = map[string]*workflow.Workflow{}
+	for _, spec := range opts.Workflows {
+		wf, err := s.buildWorkflow(spec)
+		if err != nil {
+			return nil, err
+		}
+		s.workflows[spec.Name] = wf
+	}
 	s.routes()
 	return s, nil
+}
+
+// buildTeam assembles a declarative team from the server's wrapped
+// agents (so member runs keep audit hooks and HITL sessions).
+func (s *Server) buildTeam(spec TeamSpec) (*team.Team, error) {
+	if spec.Name == "" {
+		return nil, core.NewError(core.KindValidation, "server: team without name")
+	}
+	leader := s.agents[spec.Leader]
+	if leader == nil {
+		return nil, core.NewError(core.KindValidation, fmt.Sprintf("team %q: unknown leader %q", spec.Name, spec.Leader))
+	}
+	members := make([]*agent.Agent, 0, len(spec.Members))
+	for _, m := range spec.Members {
+		if s.agents[m] == nil {
+			return nil, core.NewError(core.KindValidation, fmt.Sprintf("team %q: unknown member %q", spec.Name, m))
+		}
+		members = append(members, s.agents[m])
+	}
+	t := team.New(spec.Name, leader, members...)
+	t.Description = spec.Description
+	t.Instructions = spec.Instructions
+	if spec.MaxIterations > 0 {
+		t.MaxIterations = spec.MaxIterations
+	}
+	if strings.EqualFold(spec.Process, "sequential") {
+		t.Process = "sequential"
+	} else {
+		t.Process = "hierarchical"
+	}
+	return t, nil
+}
+
+// buildWorkflow assembles a declarative workflow from the server's
+// wrapped agents.
+func (s *Server) buildWorkflow(spec WorkflowSpec) (*workflow.Workflow, error) {
+	specs := make([]workflow.StepSpec, 0, len(spec.Steps))
+	for _, st := range spec.Steps {
+		sp := workflow.StepSpec{
+			Name:      st.Name,
+			Agent:     st.Agent,
+			Prompt:    st.Prompt,
+			DependsOn: st.DependsOn,
+			Retries:   st.Retries,
+		}
+		if st.Guard != nil {
+			sp.Guard = &workflow.GuardSpec{Rubric: st.Guard.Rubric, MinScore: st.Guard.MinScore}
+		}
+		specs = append(specs, sp)
+	}
+	wf, err := workflow.Build(spec.Name, specs, s.agents, spec.MaxRetries)
+	if err != nil {
+		return nil, err
+	}
+	wf.Description = spec.Description
+	return wf, nil
 }
 
 // Agent returns the named agent (nil when absent).
@@ -179,6 +299,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/runs/{id}/feedback", s.handlePostFeedback)
 	s.mux.HandleFunc("GET /api/runs/{id}/feedback", s.handleGetFeedback)
 	s.mux.HandleFunc("GET /api/failures", s.handleFailures)
+	s.mux.HandleFunc("GET /api/teams", s.handleTeams)
+	s.mux.HandleFunc("POST /api/teams/{name}/run", s.handleTeamRun)
+	s.mux.HandleFunc("GET /api/workflows", s.handleWorkflows)
+	s.mux.HandleFunc("POST /api/workflows/{name}/run", s.handleWorkflowRun)
 	s.mux.HandleFunc("GET /ws/chat", s.handleWS)
 	s.mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentWellKnown)
 	s.mux.HandleFunc("POST /a2a/{agent}", s.handleA2A)
@@ -384,6 +508,105 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
+}
+
+// ---------------------------------------------------------------------------
+// Teams + workflows
+// ---------------------------------------------------------------------------
+
+type teamInfo struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Leader      string   `json:"leader"`
+	Members     []string `json:"members"`
+	Process     string   `json:"process"`
+}
+
+type workflowInfo struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Steps       []string `json:"steps"`
+}
+
+type runRequest struct {
+	Input string `json:"input"`
+}
+
+func (s *Server) handleTeams(w http.ResponseWriter, r *http.Request) {
+	out := make([]teamInfo, 0, len(s.teams))
+	for _, t := range s.teams {
+		members := make([]string, 0, len(t.Members))
+		for _, m := range t.Members {
+			if m != nil {
+				members = append(members, m.Name)
+			}
+		}
+		out = append(out, teamInfo{Name: t.Name, Description: t.Description, Leader: t.Leader.Name, Members: members, Process: t.Process})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleTeamRun runs a team and streams the run events as SSE (same
+// protocol as /api/chat).
+func (s *Server) handleTeamRun(w http.ResponseWriter, r *http.Request) {
+	var req runRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	if req.Input == "" {
+		writeError(w, http.StatusBadRequest, "input is required")
+		return
+	}
+	t := s.teams[r.PathValue("name")]
+	if t == nil {
+		writeError(w, http.StatusNotFound, "unknown team "+r.PathValue("name"))
+		return
+	}
+	ch, err := t.Stream(r.Context(), req.Input, agent.RunOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.streamEvents(w, r, ch)
+}
+
+func (s *Server) handleWorkflows(w http.ResponseWriter, r *http.Request) {
+	out := make([]workflowInfo, 0, len(s.workflows))
+	for _, wf := range s.workflows {
+		steps := make([]string, 0, len(wf.Steps))
+		for _, st := range wf.Steps {
+			steps = append(steps, st.Name)
+		}
+		out = append(out, workflowInfo{Name: wf.Name, Description: wf.Description, Steps: steps})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleWorkflowRun runs a workflow and streams the step events as SSE.
+func (s *Server) handleWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	var req runRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	if req.Input == "" {
+		writeError(w, http.StatusBadRequest, "input is required")
+		return
+	}
+	wf := s.workflows[r.PathValue("name")]
+	if wf == nil {
+		writeError(w, http.StatusNotFound, "unknown workflow "+r.PathValue("name"))
+		return
+	}
+	ch, err := wf.Stream(r.Context(), req.Input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.streamEvents(w, r, ch)
 }
 
 // ---------------------------------------------------------------------------

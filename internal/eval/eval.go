@@ -323,20 +323,28 @@ func RunAll(ctx context.Context, r Runner, scenarios []Scenario) ([]*Result, err
 }
 
 // judge asks the provider to score the agent's output against the
-// scenario rubric. The model is asked for strict JSON: {"score": 0..1,
-// "reason": "..."} and anything else counts as a judge error.
+// scenario rubric.
 func judge(ctx context.Context, p llm.Provider, sc Scenario, r *Result) (*JudgeVerdict, error) {
+	return Judge(ctx, p, sc.Input, sc.Judge.Rubric, r.Output, sc.Judge.Model)
+}
+
+// Judge asks the provider to score output against a rubric on 0..1.
+// The model is asked for strict JSON: {"score": 0..1,
+// "reason": "..."} and anything else counts as a judge error.
+// model overrides the provider's default when non-empty; input is the
+// task the output answers (context for the judge).
+func Judge(ctx context.Context, p llm.Provider, input, rubric, output, model string) (*JudgeVerdict, error) {
 	if p == nil {
 		return nil, errors.New("no provider on agent")
 	}
 	prompt := "You are a rigorous eval judge for an AI agent.\n" +
 		"Score the agent's response against the rubric on a scale of 0.0 to 1.0.\n\n" +
-		"TASK:\n" + sc.Input + "\n\n" +
-		"RUBRIC:\n" + sc.Judge.Rubric + "\n\n" +
-		"AGENT OUTPUT:\n" + r.Output + "\n\n" +
+		"TASK:\n" + input + "\n\n" +
+		"RUBRIC:\n" + rubric + "\n\n" +
+		"AGENT OUTPUT:\n" + output + "\n\n" +
 		`Reply with ONLY a JSON object, no prose: {"score": 0.0-1.0, "reason": "one short sentence"}`
 	req := llm.ChatRequest{
-		Model:       sc.Judge.Model,
+		Model:       model,
 		Messages:    []core.Message{core.NewUserMessage(prompt)},
 		Temperature: floatPtr(0),
 	}

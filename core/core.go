@@ -16,6 +16,7 @@ type (
 	ToolContext      = internal.ToolContext
 	RunEvent         = internal.RunEvent
 	RunResult        = internal.RunResult
+	RunStatus        = internal.RunStatus
 	RunMetrics       = internal.RunMetrics
 	Usage            = internal.Usage
 	Message          = internal.Message
@@ -57,8 +58,15 @@ const (
 	EventRunError           = internal.EventRunError
 )
 
-// BuiltinTools is the registry of built-in tools (calculator,
-// http_fetch, now).
+const (
+	RunStatusCompleted       = internal.RunStatusCompleted
+	RunStatusFailed          = internal.RunStatusFailed
+	RunStatusInterrupted     = internal.RunStatusInterrupted
+	RunStatusAwaitingApproval = internal.RunStatusAwaitingApproval
+)
+
+// BuiltinTools is the registry of built-in tools (calculator, http_fetch,
+// now, file_read, file_write, file_list, web_search, shell_exec).
 var BuiltinTools = internal.BuiltinTools
 
 // ToolsByName indexes a tool slice by name.

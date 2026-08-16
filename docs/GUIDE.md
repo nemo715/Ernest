@@ -50,6 +50,8 @@ perfect for tests, demos, and CI.
 | `ernest new team [dir]` | Leader + members with delegation (`team.New` in Go) |
 | `ernest new workflow [dir]` | Sequential workflow skeleton |
 | `ernest new server [dir]` | HTTP server wiring (SSE + WS + static UI) |
+| `ernest new knowledge [dir]` | RAG assistant: `docs/` + ingestion + retrieval chat |
+| `ernest new quantum [dir]` | Multi-agent research pipeline with `orchestrate.py` |
 
 > **Note**: every scaffold is its own Go module (`go.mod`) that requires
 > `github.com/nemo715/Ernest` from the public module path, so it compiles
@@ -64,6 +66,8 @@ perfect for tests, demos, and CI.
 | Field | Meaning |
 |---|---|
 | `agents` | Required. One or more agent definitions |
+| `teams` | Optional. Config-driven teams (leader + members + process) |
+| `workflows` | Optional. Config-driven workflows (steps with agents/prompts/deps) |
 | `mcpServers` | Optional. MCP servers exposed to agents as tools |
 | `store` | Optional. `{"type": "memory"|"sqlite", "dsn": "path.db"}` |
 
@@ -144,7 +148,13 @@ ernest.exe run -no-memory -input "hi"
 ```
 
 Run flags: `-config` (default `ernest.json`), `-agent`, `-input`, `-session`,
-`-json`, `-no-memory`.
+`-json`, `-no-memory`. With `teams`/`workflows` in the config you can also run
+orchestration directly from the CLI:
+
+```bash
+ernest.exe run -team editorial -input "plan the release"
+ernest.exe run -workflow pipeline -input "Go concurrency" --json
+```
 
 ### The playground (web UI)
 
@@ -164,62 +174,117 @@ The web UI is a full **dev console**, not just a chat window: runs & traces
 knowledge chunks, history window), sessions, the HITL approvals queue,
 the failures feed and the audit log. See the sidebar in the app.
 
-## 5. Teams (delegation)
+## 5. Teams & workflows (config-driven)
 
-Teams are assembled in Go — `ernest.json` has no team concept. The scaffold
-gives you the wiring:
+`ernest.json` can declare teams and workflows directly — no Go code needed.
+A **team** runs its members under a leader (delegation) or in a fixed
+sequence; a **workflow** is a dependency-ordered pipeline of steps, each
+step an agent + prompt.
 
-```bash
-ernest.exe new team examples/desk
-cd examples/desk
-go mod tidy   # first run only: fetches github.com/nemo715/Ernest
-go run .
-```
-
-```go
-// examples/desk/main.go (abridged)
-cfg, _ := config.Load("ernest.json")
-rt, _ := cfg.Build(nil)
-defer rt.Close()
-
-desk := team.New("desk",
-    byName(rt.Agents, "lead"),
-    byName(rt.Agents, "researcher"),
-    byName(rt.Agents, "writer"),
-)
-
-for ev := range desk.Stream(ctx, team.TeamOptions{
-    LeaderID: "lead",
-    Input:    "Research X and write a short summary.",
-}) {
-    // ev.Type: delegate.start / delegate.end carry the member agent's
-    // events in ev.Data; tool results arrive as ev.ToolResult...
+```json
+{
+  "agents": [
+    { "name": "lead", "provider": "mock", "model": "mock-1", "instructions": "You coordinate the team." },
+    { "name": "researcher", "provider": "mock", "model": "mock-1", "instructions": "You research topics." },
+    { "name": "writer", "provider": "mock", "model": "mock-1", "instructions": "You write clearly." }
+  ],
+  "teams": [
+    {
+      "name": "editorial",
+      "leader": "lead",
+      "members": ["researcher", "writer"],
+      "process": "sequential"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "pipeline",
+      "steps": [
+        { "name": "research", "agent": "researcher", "prompt": "Research {{input}}" },
+        { "name": "write", "agent": "writer", "prompt": "Write from {{research}}", "dependsOn": ["research"] }
+      ]
+    }
+  ]
 }
 ```
 
-The leader calls members through the `delegate` tool; delegation streams live
-as `delegate.start`/`delegate.end` events. The scaffold adapts to its
-environment: with `OPENROUTER_API_KEY` set it builds three real providers
-(gpt-4o-mini via OpenRouter) and **the model decides delegation itself**;
-without a key it uses scripted mock providers — the leader's scripted turn
-calls `delegate`, the member answers, and the stream prints both events — so
-the same code runs offline and deterministically for demos and CI.
+Team fields: `name`, `leader`, `members` (agent names), `process`
+(`hierarchical` default — the leader delegates via a built-in `delegate`
+tool, or `sequential` — members run in declaration order, each output
+feeding the next), plus optional `maxIterations` and `instructions`.
+Workflow step fields: `name`, `agent`, `prompt` (with `{{input}}` and
+`{{stepName}}` placeholders), `dependsOn`. Steps without dependencies may
+run concurrently.
+
+Run them from the CLI or the server:
+
+```bash
+ernest.exe run -team editorial -input "plan the release" --json
+ernest.exe run -workflow pipeline -input "Go concurrency" --json
+
+# server: GET /api/teams, GET /api/workflows
+#         POST /api/teams/{name}/run, POST /api/workflows/{name}/run  (SSE)
+```
+
+Team runs stream `delegate.start`/`delegate.end` events per member;
+workflow runs stream `step.start`/`step.end` events. Team run metadata
+carries `team`, `process` and the member list; workflow metadata carries
+the workflow name and step count, and the result state maps step names
+to their outputs.
+
+> **Go API**: the same orchestration is available programmatically in
+> `github.com/nemo715/Ernest/team` and `github.com/nemo715/Ernest/workflow`;
+> the `ernest new team` / `ernest new workflow` templates scaffold that
+> wiring as a standalone Go module.
+
+> **Python**: define teams/workflows as plain Python with the DSL — see
+> [docs/PYTHON.md](PYTHON.md) (`python -m ernest run crew.py`).
 
 ## 6. Tools
 
 Built-in tools are enabled per agent via `"tools"`:
 
-| Name | What it does |
-|---|---|
-| `calculator` | Safe arithmetic expression evaluator |
-| `http_fetch` | GET a URL and return the text |
-| `now` | Current UTC time |
-| `browser` | Headless Chrome (CDP, via go-rod) — **lazy**: the browser process only launches on first use |
-| `a2a_call` | Call another agent (used by teams) |
+| Name | What it does | Default policy |
+|---|---|---|
+| `calculator` | Safe arithmetic expression evaluator | Runs freely |
+| `http_fetch` | GET a URL and return the text | Runs freely |
+| `now` | Current UTC time | Runs freely |
+| `web_search` | DuckDuckGo HTML search (no API key) | Runs freely |
+| `file_read`, `file_list` | Read / list files inside the agent's `toolSandbox` | Runs freely (sandbox only) |
+| `file_write` | Write / append a file inside the agent's `toolSandbox` | Requires approval (opt out via `toolPolicy.autoApprove`) |
+| `shell_exec` | Run a shell command inside the agent's `toolSandbox` | Disabled by default (`toolPolicy.enableShell`); **always** requires approval, never auto-approvable, audit-logged |
+| `browser_navigate`, `browser_read`, `browser_click`, `browser_type`, `browser_screenshot` | Drive a shared headless Edge/Chrome window (CDP, lazy launch) | Requires approval by default (opt out via `toolPolicy.autoApprove`) |
+| `browser` | Legacy single-tool browser (action enum) | Runs freely |
+| `a2a_call` | Call another agent (used by teams) | — |
 
 ```json
-"tools": ["calculator", "http_fetch", "now", "browser"]
+"tools": ["calculator", "http_fetch", "now", "file_read", "file_write", "web_search"]
 ```
+
+### Sandbox + policy
+
+File and shell tools only touch the agent's `toolSandbox` directory
+(relative paths resolve inside it; absolute paths and `..` escapes are
+rejected). Tune approvals per agent with `toolPolicy`:
+
+```json
+{
+  "name": "worker",
+  "tools": ["file_read", "file_write", "file_list", "web_search", "shell_exec"],
+  "toolSandbox": "sandbox",
+  "toolPolicy": {
+    "enableShell": true,
+    "autoApprove": ["file_write"],
+    "requireApproval": ["web_search"]
+  }
+}
+```
+
+`enableShell` gates `shell_exec` (off by default); `autoApprove` exempts
+tools from the default approval set (but can never include `shell_exec`);
+`requireApproval` adds extra approval-gated tools. `ernest doctor` warns
+when `shell_exec` is enabled. Everything else — databases, SaaS APIs,
+anything — attaches via **MCP servers** (next section).
 
 ### MCP servers
 
@@ -468,7 +533,33 @@ records the live run as the new baseline. Each scenario runs
 `skipMemory: true` with a per-scenario timeout (default 120s,
 `--timeout`).
 
-## 10. Python SDK
+## 10. Python: authoring + SDK
+
+ernest is Python-first too. Write crews, teams and workflows in plain
+Python (DSL), compile them to `ernest.json`, and run them through the
+same Go engine:
+
+```python
+# crew.py
+from ernest import Agent, Task, Crew
+
+researcher = Agent("researcher", provider="mock", instructions="You research topics.")
+writer = Agent("writer", provider="mock", instructions="You write clearly.")
+research = Task(researcher, "Research {{input}}", name="research")
+write = Task(writer, "Write from {{research}}", name="write", depends_on=["research"])
+crew = Crew(name="py-crew", tasks=[research, write])
+```
+
+```bash
+pip install ./python
+python -m ernest run crew.py --input "quantum chips" --json
+python -m ernest doctor crew.py
+```
+
+Full authoring reference (DSL shapes, teams, workflows, validation,
+`ERNEST_BIN` discovery): [docs/PYTHON.md](PYTHON.md).
+
+### SDK clients
 
 ```bash
 pip install ./python
@@ -571,6 +662,8 @@ list resources, read resources, list prompts and fetch a prompt.
 |---|---|
 | `GET /healthz` | Liveness |
 | `GET /api/agents` | Agent list |
+| `GET /api/teams`, `GET /api/workflows` | Orchestration registry |
+| `POST /api/teams/{name}/run`, `POST /api/workflows/{name}/run` | Team / workflow runs (SSE) |
 | `POST /api/chat` | Streaming chat (SSE) |
 | `POST /api/approve` | Approve/deny a pending tool call |
 | `GET /api/sessions`, `GET/DELETE /api/sessions/{id}` | Session store |

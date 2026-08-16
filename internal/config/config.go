@@ -20,7 +20,9 @@ import (
 	"github.com/nemo715/Ernest/internal/llm"
 	"github.com/nemo715/Ernest/internal/mcp"
 	"github.com/nemo715/Ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/team"
 	"github.com/nemo715/Ernest/internal/vector"
+	"github.com/nemo715/Ernest/internal/workflow"
 )
 
 // DefaultFile is the default config file name.
@@ -35,6 +37,19 @@ const browserToolName = "browser"
 // a2aToolName is the lazily-wired A2A client tool.
 const a2aToolName = "a2a_call"
 
+// defaultApprovalTools are the tool names that require human approval
+// unless the agent's toolPolicy.autoApprove exempts them. file_write
+// and every browser action are side-effectful by default; file_read,
+// file_list and web_search stay safe to run unattended.
+var defaultApprovalTools = map[string]bool{
+	core.ToolFileWrite:    true,
+	browser.NavigateName:  true,
+	browser.ReadName:      true,
+	browser.ClickName:     true,
+	browser.TypeName:      true,
+	browser.ScreenshotName: true,
+}
+
 // Config is the root document of ernest.json.
 type Config struct {
 	Agents     []AgentConfig     `json:"agents"`
@@ -48,6 +63,14 @@ type Config struct {
 	// failed run on the server: the production feed that
 	// `ernest eval --learn` turns into regression scenarios.
 	Failures string `json:"failures,omitempty"`
+
+	// Teams are declarative multi-agent teams built at load time and
+	// runnable via `ernest run --team` or POST /api/teams/{name}/run.
+	Teams []TeamConfig `json:"teams,omitempty"`
+	// Workflows are declarative step DAGs over the configured agents,
+	// runnable via `ernest run --workflow` or
+	// POST /api/workflows/{name}/run.
+	Workflows []WorkflowConfig `json:"workflows,omitempty"`
 
 	// dir is the config file's directory; relative knowledge sources
 	// resolve against it.
@@ -77,6 +100,39 @@ type AgentConfig struct {
 	// per-agent vector collection (in-memory by default, Qdrant when
 	// store.type is qdrant).
 	SemanticMemory bool `json:"semanticMemory,omitempty"`
+	// ToolSandbox is the base directory for the file/shell tool packs
+	// (file_read/file_write/file_list/shell_exec). Required when those
+	// tools are attached; relative paths resolve against the config
+	// file's directory. Every path outside it is rejected at runtime.
+	ToolSandbox string `json:"toolSandbox,omitempty"`
+	// ToolPolicy tunes approval behavior for the tool packs.
+	ToolPolicy *ToolPolicyConfig `json:"toolPolicy,omitempty"`
+}
+
+// ToolPolicyConfig tunes approval behavior for the tool packs.
+//
+// Guardrails (not optional):
+//   - file_write and every browser tool require human approval by
+//     default; autoApprove is the explicit opt-out.
+//   - shell_exec is disabled unless enableShell is true — and even then
+//     it ALWAYS requires approval (autoApprove may never contain it,
+//     enforced at validation) and every command is audit-logged in the
+//     run trace.
+//
+//	"toolPolicy": {
+//	  "enableShell": true,
+//	  "autoApprove": ["file_write"],
+//	  "requireApproval": ["file_read"]
+//	}
+type ToolPolicyConfig struct {
+	// EnableShell opts the agent into shell_exec (default false).
+	EnableShell bool `json:"enableShell,omitempty"`
+	// AutoApprove lists tool names that skip the human approval gate.
+	// shell_exec can never appear here.
+	AutoApprove []string `json:"autoApprove,omitempty"`
+	// RequireApproval lists additional tool names that always pause
+	// for human approval (beyond the built-in defaults).
+	RequireApproval []string `json:"requireApproval,omitempty"`
 }
 
 // EmbeddingsConfig selects the provider used to embed text.
@@ -125,6 +181,60 @@ type StoreConfig struct {
 	DSN  string `json:"dsn,omitempty"`  // sqlite file path
 }
 
+// TeamConfig describes a declarative multi-agent team.
+//
+// Process "hierarchical" (default) gives the leader the delegate tool
+// and full autonomy; "sequential" runs members in declaration order,
+// feeding each member's output to the next (no leader model call).
+//
+//	"teams": [{
+//	  "name": "editorial",
+//	  "leader": "lead",
+//	  "members": ["researcher", "writer"],
+//	  "process": "hierarchical"
+//	}]
+type TeamConfig struct {
+	Name          string   `json:"name"`
+	Description   string   `json:"description,omitempty"`
+	Leader        string   `json:"leader"`
+	Members       []string `json:"members"`
+	Process       string   `json:"process,omitempty"` // hierarchical (default) | sequential
+	MaxIterations int      `json:"maxIterations,omitempty"`
+	Instructions  string   `json:"instructions,omitempty"`
+}
+
+// GuardConfig attaches an LLM-judged quality gate to a workflow step:
+// the step's agent provider scores the step output against the rubric
+// (0..1) and the step fails below minScore (default 0.7). The judge is
+// a second model call — the mock provider cannot judge; use a real (or
+// scripted) model for guarded steps.
+type GuardConfig struct {
+	Rubric   string  `json:"rubric"`
+	MinScore float64 `json:"minScore,omitempty"`
+}
+
+// WorkflowStepConfig is one node of a workflow DAG. Prompt placeholders
+// of the form {{name}} (or {{input}}) are replaced with earlier step
+// outputs before the agent call.
+type WorkflowStepConfig struct {
+	Name      string       `json:"name"`
+	Agent     string       `json:"agent"`
+	Prompt    string       `json:"prompt,omitempty"`
+	DependsOn []string     `json:"dependsOn,omitempty"`
+	Retries   int          `json:"retries,omitempty"`
+	Guard     *GuardConfig `json:"guard,omitempty"`
+}
+
+// WorkflowConfig describes a declarative step DAG over the configured
+// agents. Steps run in dependency order; independent steps run
+// concurrently; the final result is the shared state as JSON.
+type WorkflowConfig struct {
+	Name        string               `json:"name"`
+	Description string               `json:"description,omitempty"`
+	Steps       []WorkflowStepConfig `json:"steps"`
+	MaxRetries  int                  `json:"maxRetries,omitempty"`
+}
+
 // Load reads and validates the config file at path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -169,12 +279,19 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("agent %q: model is required", a.Name)
 		}
 		for _, t := range a.Tools {
-			if t == browserToolName || t == a2aToolName || t == agent.RememberToolName || t == agent.RecallToolName {
+			if t == browserToolName || t == a2aToolName ||
+				t == browser.NavigateName || t == browser.ReadName ||
+				t == browser.ClickName || t == browser.TypeName ||
+				t == browser.ScreenshotName ||
+				t == agent.RememberToolName || t == agent.RecallToolName {
 				continue // wired lazily in buildAgent (needs no registry entry)
 			}
 			if core.ToolsByName(core.BuiltinTools)[t] == nil {
 				return fmt.Errorf("agent %q: unknown tool %q", a.Name, t)
 			}
+		}
+		if err := validateToolPolicy(a); err != nil {
+			return err
 		}
 	}
 	// Knowledge + semantic memory rules.
@@ -220,7 +337,181 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	if err := c.validateTeams(seen); err != nil {
+		return err
+	}
+	if err := c.validateWorkflows(seen); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateToolPolicy enforces the tool pack guardrails for one agent:
+// the sandbox requirement, the shell opt-in, and toolPolicy tool-name
+// sanity.
+func validateToolPolicy(a AgentConfig) error {
+	attached := map[string]bool{}
+	for _, t := range a.Tools {
+		attached[t] = true
+	}
+	policy := a.ToolPolicy
+	if policy == nil {
+		policy = &ToolPolicyConfig{}
+	}
+	// file/shell packs only run inside a configured sandbox.
+	if attached[core.ToolFileRead] || attached[core.ToolFileWrite] || attached[core.ToolFileList] || attached[core.ToolShellExec] {
+		if strings.TrimSpace(a.ToolSandbox) == "" {
+			return fmt.Errorf("agent %q: file/shell tools require \"toolSandbox\" (the pack base directory)", a.Name)
+		}
+	}
+	// shell_exec is disabled by default; enabling it is explicit.
+	if attached[core.ToolShellExec] && !policy.EnableShell {
+		return fmt.Errorf("agent %q: shell_exec is disabled by default — set toolPolicy.enableShell to opt in (commands always require human approval and are audit-logged)", a.Name)
+	}
+	for _, t := range policy.AutoApprove {
+		if t == core.ToolShellExec {
+			return fmt.Errorf("agent %q: shell_exec always requires human approval and can never appear in toolPolicy.autoApprove", a.Name)
+		}
+		if !knownToolName(t) {
+			return fmt.Errorf("agent %q: toolPolicy.autoApprove references unknown tool %q", a.Name, t)
+		}
+	}
+	for _, t := range policy.RequireApproval {
+		if !knownToolName(t) {
+			return fmt.Errorf("agent %q: toolPolicy.requireApproval references unknown tool %q", a.Name, t)
+		}
+		// The tool must actually be attached (or auto-attached via
+		// semantic memory) for the policy to mean anything.
+		if !attached[t] && !((t == agent.RememberToolName || t == agent.RecallToolName) && a.SemanticMemory) {
+			return fmt.Errorf("agent %q: toolPolicy.requireApproval references tool %q which is not attached to this agent", a.Name, t)
+		}
+	}
+	return nil
+}
+
+// knownToolName reports whether t is a valid tool name: a core built-in,
+// a browser pack tool, the legacy browser tool, the A2A client or the
+// memory tools.
+func knownToolName(t string) bool {
+	if core.ToolsByName(core.BuiltinTools)[t] != nil {
+		return true
+	}
+	switch t {
+	case browserToolName, a2aToolName,
+		browser.NavigateName, browser.ReadName, browser.ClickName,
+		browser.TypeName, browser.ScreenshotName,
+		agent.RememberToolName, agent.RecallToolName:
+		return true
+	}
+	return false
+}
+
+// validateTeams checks team shapes: unique names, existing agents and
+// a known process mode.
+func (c *Config) validateTeams(agents map[string]bool) error {
+	teamSeen := map[string]bool{}
+	for _, t := range c.Teams {
+		if t.Name == "" {
+			return fmt.Errorf("team without name")
+		}
+		if teamSeen[t.Name] {
+			return fmt.Errorf("duplicate team %q", t.Name)
+		}
+		teamSeen[t.Name] = true
+		if !agents[t.Leader] {
+			return fmt.Errorf("team %q: unknown leader %q", t.Name, t.Leader)
+		}
+		if len(t.Members) == 0 {
+			return fmt.Errorf("team %q: at least one member is required", t.Name)
+		}
+		for _, m := range t.Members {
+			if !agents[m] {
+				return fmt.Errorf("team %q: unknown member %q", t.Name, m)
+			}
+		}
+		switch strings.ToLower(t.Process) {
+		case "", "hierarchical", "sequential":
+		default:
+			return fmt.Errorf("team %q: unknown process %q (hierarchical|sequential)", t.Name, t.Process)
+		}
+	}
+	return nil
+}
+
+// validateWorkflows checks workflow shapes: unique names and steps,
+// existing agents, valid dependencies and no cycles.
+func (c *Config) validateWorkflows(agents map[string]bool) error {
+	wfSeen := map[string]bool{}
+	for _, w := range c.Workflows {
+		if w.Name == "" {
+			return fmt.Errorf("workflow without name")
+		}
+		if wfSeen[w.Name] {
+			return fmt.Errorf("duplicate workflow %q", w.Name)
+		}
+		wfSeen[w.Name] = true
+		stepNames := map[string]bool{}
+		for _, s := range w.Steps {
+			if s.Name == "" {
+				return fmt.Errorf("workflow %q: step without name", w.Name)
+			}
+			if stepNames[s.Name] {
+				return fmt.Errorf("workflow %q: duplicate step %q", w.Name, s.Name)
+			}
+			stepNames[s.Name] = true
+			if !agents[s.Agent] {
+				return fmt.Errorf("workflow %q: step %q: unknown agent %q", w.Name, s.Name, s.Agent)
+			}
+			if s.Guard != nil && s.Guard.Rubric == "" {
+				return fmt.Errorf("workflow %q: step %q: guard requires a rubric", w.Name, s.Name)
+			}
+		}
+		for _, s := range w.Steps {
+			for _, d := range s.DependsOn {
+				if !stepNames[d] {
+					return fmt.Errorf("workflow %q: step %q depends on unknown step %q", w.Name, s.Name, d)
+				}
+			}
+		}
+		if hasCycle(w.Steps) {
+			return fmt.Errorf("workflow %q: dependency cycle detected", w.Name)
+		}
+	}
+	return nil
+}
+
+// hasCycle reports whether the step DAG contains a dependency cycle
+// (Kahn's topological-sort check).
+func hasCycle(steps []WorkflowStepConfig) bool {
+	indeg := map[string]int{}
+	deps := map[string][]string{}
+	names := make([]string, 0, len(steps))
+	for _, s := range steps {
+		names = append(names, s.Name)
+		indeg[s.Name] = len(s.DependsOn)
+		for _, d := range s.DependsOn {
+			deps[d] = append(deps[d], s.Name)
+		}
+	}
+	queue := []string{}
+	for _, n := range names {
+		if indeg[n] == 0 {
+			queue = append(queue, n)
+		}
+	}
+	processed := 0
+	for len(queue) > 0 {
+		n := queue[0]
+		queue = queue[1:]
+		processed++
+		for _, next := range deps[n] {
+			indeg[next]--
+			if indeg[next] == 0 {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return processed != len(names)
 }
 
 // validateEmbeddings checks the embeddings block against the agents
@@ -263,7 +554,11 @@ func (c *Config) validateEmbeddings() error {
 type Runtime struct {
 	Agents []*agent.Agent
 	Store  storage.SessionStore
-	clients []*mcp.Client
+	// Teams and Workflows are the config-declared orchestrations, keyed
+	// by name (empty maps when the config declares none).
+	Teams     map[string]*team.Team
+	Workflows map[string]*workflow.Workflow
+	clients   []*mcp.Client
 }
 
 // Build constructs agents, the session store and MCP clients from the
@@ -318,7 +613,63 @@ func (c *Config) Build(env func(string) string) (*Runtime, error) {
 		}
 		rt.Agents = append(rt.Agents, ag)
 	}
+	if err := rt.buildOrchestration(c); err != nil {
+		rt.Close()
+		return nil, err
+	}
 	return rt, nil
+}
+
+// buildOrchestration builds the config-declared teams and workflows
+// from the runtime agents.
+func (rt *Runtime) buildOrchestration(c *Config) error {
+	rt.Teams = map[string]*team.Team{}
+	rt.Workflows = map[string]*workflow.Workflow{}
+	agentByName := map[string]*agent.Agent{}
+	for _, a := range rt.Agents {
+		agentByName[a.Name] = a
+	}
+	for _, tc := range c.Teams {
+		members := make([]*agent.Agent, 0, len(tc.Members))
+		for _, m := range tc.Members {
+			members = append(members, agentByName[m])
+		}
+		t := team.New(tc.Name, agentByName[tc.Leader], members...)
+		t.Description = tc.Description
+		t.Instructions = tc.Instructions
+		if tc.MaxIterations > 0 {
+			t.MaxIterations = tc.MaxIterations
+		}
+		if strings.EqualFold(tc.Process, "sequential") {
+			t.Process = "sequential"
+		} else {
+			t.Process = "hierarchical"
+		}
+		rt.Teams[tc.Name] = t
+	}
+	for _, wc := range c.Workflows {
+		specs := make([]workflow.StepSpec, 0, len(wc.Steps))
+		for _, sc := range wc.Steps {
+			sp := workflow.StepSpec{
+				Name:      sc.Name,
+				Agent:     sc.Agent,
+				Prompt:    sc.Prompt,
+				DependsOn: sc.DependsOn,
+				Retries:   sc.Retries,
+			}
+			if sc.Guard != nil {
+				sp.Guard = &workflow.GuardSpec{Rubric: sc.Guard.Rubric, MinScore: sc.Guard.MinScore}
+			}
+			specs = append(specs, sp)
+		}
+		wf, err := workflow.Build(wc.Name, specs, agentByName, wc.MaxRetries)
+		if err != nil {
+			return err
+		}
+		wf.Description = wc.Description
+		rt.Workflows[wc.Name] = wf
+	}
+	return nil
 }
 
 // Close releases MCP connections and the session store.
@@ -340,6 +691,59 @@ func (rt *Runtime) Close() error {
 	return nil
 }
 
+// approvalTools computes the agent's require-approval tool list: the
+// built-in default gates (file_write + browser pack) minus the policy's
+// autoApprove exemptions, plus the policy's extra requireApproval
+// entries. shell_exec is always required when attached — it can never
+// be auto-approved (enforced at validation).
+func approvalTools(ac AgentConfig) []string {
+	attached := map[string]bool{}
+	for _, t := range ac.Tools {
+		attached[t] = true
+	}
+	exempt := map[string]bool{}
+	var extra []string
+	if ac.ToolPolicy != nil {
+		for _, t := range ac.ToolPolicy.AutoApprove {
+			exempt[t] = true
+		}
+		extra = ac.ToolPolicy.RequireApproval
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(t string) {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	for _, t := range ac.Tools {
+		if t == core.ToolShellExec || (defaultApprovalTools[t] && !exempt[t]) {
+			add(t)
+		}
+	}
+	for _, t := range extra {
+		if attached[t] {
+			// An explicit requireApproval always wins over autoApprove.
+			add(t)
+		}
+	}
+	return out
+}
+
+// resolveSandbox resolves the agent's toolSandbox against the config
+// file's directory so runtime behavior is independent of the process
+// CWD. An empty sandbox stays empty (file/shell tools refuse to run).
+func (c *Config) resolveSandbox(sandbox string) string {
+	if strings.TrimSpace(sandbox) == "" {
+		return ""
+	}
+	if filepath.IsAbs(sandbox) {
+		return sandbox
+	}
+	return filepath.Join(c.dir, sandbox)
+}
+
 func (c *Config) buildAgent(ac AgentConfig, env func(string) string, store storage.SessionStore, clients map[string]*mcp.Client) (*agent.Agent, error) {
 	p, err := c.provider(ac, env)
 	if err != nil {
@@ -351,12 +755,17 @@ func (c *Config) buildAgent(ac AgentConfig, env func(string) string, store stora
 	ag.Temperature = ac.Temperature
 	ag.MaxTokens = ac.MaxTokens
 	ag.MaxIterations = ac.MaxIterations
+	ag.ToolSandbox = c.resolveSandbox(ac.ToolSandbox)
+	ag.RequireApprovalTools = approvalTools(ac)
 	if len(ac.Tools) > 0 {
 		byName := core.ToolsByName(core.BuiltinTools)
+		browserByName := core.ToolsByName(browser.Tools)
 		for _, name := range ac.Tools {
 			switch name {
 			case browserToolName:
 				ag.Tools = append(ag.Tools, browser.Tool)
+			case browser.NavigateName, browser.ReadName, browser.ClickName, browser.TypeName, browser.ScreenshotName:
+				ag.Tools = append(ag.Tools, browserByName[name])
 			case a2aToolName:
 				ag.Tools = append(ag.Tools, a2a.CallTool)
 			default:

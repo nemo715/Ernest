@@ -12,11 +12,15 @@ from ernest import AgentError, AsyncClient, NotFoundError
 from ernest.types import (
     EVENT_APPROVAL_REQUESTED,
     EVENT_APPROVAL_RESOLVED,
+    EVENT_DELEGATE_END,
+    EVENT_DELEGATE_START,
     EVENT_MESSAGE_COMPLETE,
     EVENT_MESSAGE_DELTA,
     EVENT_RUN_COMPLETE,
     EVENT_RUN_METRICS,
     EVENT_RUN_START,
+    EVENT_STEP_END,
+    EVENT_STEP_START,
     EVENT_TOOL_CALL,
     EVENT_TOOL_RESULT,
     EVENT_TRACE_SPAN,
@@ -217,3 +221,105 @@ def test_async_get_missing_run_trace_raises(base_url: str) -> None:
     assert exc is not None
     assert exc.status == 404
     assert "unknown run" in exc.message
+
+
+# ---------------------------------------------------------------------------
+# Teams + workflows (config-driven orchestration)
+# ---------------------------------------------------------------------------
+
+
+def test_async_list_teams(base_url: str) -> None:
+    async def main() -> list:
+        return await AsyncClient(base_url).list_teams()
+
+    teams = _run(main)
+    assert len(teams) == 1
+    assert teams[0].name == "editorial"
+    assert teams[0].leader == "assistant"
+    assert teams[0].members == ["researcher", "writer"]
+    assert teams[0].process == "hierarchical"
+
+
+def test_async_list_workflows(base_url: str) -> None:
+    async def main() -> list:
+        return await AsyncClient(base_url).list_workflows()
+
+    workflows = _run(main)
+    assert len(workflows) == 1
+    assert workflows[0].name == "pipeline"
+    assert workflows[0].steps == ["research", "write"]
+
+
+def test_async_stream_team_sequence(base_url: str) -> None:
+    async def main() -> list:
+        return [ev.type async for ev in AsyncClient(base_url).stream_team("editorial", "x")]
+
+    types = _run(main)
+    assert types == [
+        EVENT_RUN_START,
+        EVENT_DELEGATE_START,
+        EVENT_DELEGATE_END,
+        EVENT_RUN_COMPLETE,
+    ]
+
+
+def test_async_run_team(base_url: str) -> None:
+    async def main() -> Any:
+        return await AsyncClient(base_url).run_team("editorial", "summarize X")
+
+    result = _run(main)
+    assert result.completed
+    assert result.output == "synthesised answer"
+    assert result.metadata == {"team": "editorial", "process": "hierarchical", "members": 2}
+
+
+def test_async_stream_workflow_sequence(base_url: str) -> None:
+    async def main() -> list:
+        return [ev.type async for ev in AsyncClient(base_url).stream_workflow("pipeline", "x")]
+
+    types = _run(main)
+    assert types == [
+        EVENT_RUN_START,
+        EVENT_STEP_START,
+        EVENT_STEP_END,
+        EVENT_STEP_START,
+        EVENT_STEP_END,
+        EVENT_RUN_COMPLETE,
+    ]
+
+
+def test_async_run_workflow(base_url: str) -> None:
+    async def main() -> Any:
+        return await AsyncClient(base_url).run_workflow("pipeline", "topic")
+
+    result = _run(main)
+    assert result.completed
+    assert result.metadata == {"workflow": "pipeline", "steps": 2}
+
+
+def test_async_run_unknown_team_raises(base_url: str) -> None:
+    async def main() -> Optional[NotFoundError]:
+        try:
+            await AsyncClient(base_url).run_team("ghost", "x")
+            return None
+        except NotFoundError as exc:
+            return exc
+
+    exc = _run(main)
+    assert exc is not None
+    assert exc.status == 404
+    assert "unknown team ghost" in exc.message
+
+
+def test_async_run_unknown_workflow_raises(base_url: str) -> None:
+    async def main() -> Optional[NotFoundError]:
+        try:
+            await AsyncClient(base_url).run_workflow("ghost", "x")
+            return None
+        except NotFoundError as exc:
+            return exc
+
+    exc = _run(main)
+    assert exc is not None
+    assert exc.status == 404
+    assert "unknown workflow ghost" in exc.message

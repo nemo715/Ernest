@@ -24,6 +24,8 @@ from .types import (
     RunTrace,
     Session,
     SessionInfo,
+    TeamInfo,
+    WorkflowInfo,
 )
 
 
@@ -194,6 +196,42 @@ class AsyncClient:
         """GET /api/agents — available agents."""
         data = await self._json("GET", "/api/agents") or []
         return [a for a in (AgentInfo.from_dict(d) for d in data) if a is not None]
+
+    # ------------------------------------------------------------------
+    # Teams + workflows
+    # ------------------------------------------------------------------
+
+    async def list_teams(self) -> List[TeamInfo]:
+        """GET /api/teams — config-declared teams."""
+        data = await self._json("GET", "/api/teams") or []
+        return [t for t in (TeamInfo.from_dict(d) for d in data) if t is not None]
+
+    async def stream_team(self, name: str, input: str) -> AsyncIterator[RunEvent]:
+        """Run a config-declared team; yields its events."""
+        async for event in self._stream(
+            "POST", f"/api/teams/{urllib.parse.quote(name, safe='')}/run", {"input": input}
+        ):
+            yield event
+
+    async def run_team(self, name: str, input: str) -> RunResult:
+        """Run a config-declared team and return its final result."""
+        return await _collect_result(self.stream_team(name, input))
+
+    async def list_workflows(self) -> List[WorkflowInfo]:
+        """GET /api/workflows — config-declared workflows."""
+        data = await self._json("GET", "/api/workflows") or []
+        return [w for w in (WorkflowInfo.from_dict(d) for d in data) if w is not None]
+
+    async def stream_workflow(self, name: str, input: str) -> AsyncIterator[RunEvent]:
+        """Run a config-declared workflow; yields its events."""
+        async for event in self._stream(
+            "POST", f"/api/workflows/{urllib.parse.quote(name, safe='')}/run", {"input": input}
+        ):
+            yield event
+
+    async def run_workflow(self, name: str, input: str) -> RunResult:
+        """Run a config-declared workflow and return its final result."""
+        return await _collect_result(self.stream_workflow(name, input))
 
     async def list_sessions(self, agent: Optional[str] = None) -> List[SessionInfo]:
         """GET /api/sessions — session summaries (optionally filtered)."""

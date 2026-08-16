@@ -24,6 +24,10 @@ type ToolContext struct {
 	HTTP *http.Client
 	// Emit, when set, lets tools stream custom events into the run.
 	Emit func(RunEvent)
+	// Sandbox is the agent's configured tool sandbox directory (base dir
+	// for the file and shell tool packs). Empty means those tools refuse
+	// to run.
+	Sandbox string
 }
 
 // NewToolContext builds an empty tool context.
@@ -254,4 +258,4 @@ var Now = MustTool[NowArgs]("now", "Return the current UTC date and time", func(
 })
 
 // BuiltinTools is the registry of built-in tools.
-var BuiltinTools = []*Tool{HTTPFetch, Calculator, Now}
+var BuiltinTools = []*Tool{HTTPFetch, Calculator, Now, FileRead, FileWrite, FileList, WebSearch, ShellExec}

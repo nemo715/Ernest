@@ -14,7 +14,7 @@ live progress instead of waiting for a final answer.
 | Layer | What you get |
 |---|---|
 | **Agents** | Declarative `ernest.json` config, built-in tools, tool-loop with iteration cap |
-| **Teams** | Leader/member delegation with live `delegate.start/end` streaming (Go API) |
+| **Teams & workflows** | Config-driven teams (hierarchical / sequential) and workflow DAGs — author in `ernest.json` **or** Python DSL, run via CLI / HTTP / Go / Python |
 | **Human-in-the-loop** | Tool calls that pause for approval; approve/deny over REST or SDK |
 | **Guardrails** | Token & cost caps, deny-lists, always-require-approval tools, input redaction |
 | **Memory & storage** | Session store (in-memory or SQLite), agent memory, knowledge base |
@@ -25,6 +25,46 @@ live progress instead of waiting for a final answer.
 | **Dev console** | Next.js console served by the runtime: runs & traces (waterfall + context panel), sessions, HITL approvals queue, failures feed, audit log |
 | **CLI** | `init`, `new`, `run`, `playground`, `doctor`, `eval`, `replay`, `mcp-serve` |
 | **SDKs** | Python (sync + async), examples in Go; Next.js playground UI |
+
+## Built-in tools
+
+Attach tools per agent via `"tools": [...]` in `ernest.json`.
+
+| Tool | What it does | Default policy |
+|---|---|---|
+| `calculator` | Safe arithmetic (no eval) | Runs freely |
+| `http_fetch` | Fetch a URL as LLM-safe plain text | Runs freely |
+| `now` | Current UTC time | Runs freely |
+| `web_search` | DuckDuckGo HTML search (no API key) — plain web results only, no news/news-feed/SERP coverage | Runs freely |
+| `file_read` / `file_list` | Read / list files inside the agent's `toolSandbox` | Runs freely (sandbox only) |
+| `file_write` | Write or append a file inside the agent's `toolSandbox` | Always requires approval (opt out via `toolPolicy.autoApprove`) |
+| `shell_exec` | Run a shell command inside the agent's `toolSandbox` | Disabled by default (`toolPolicy.enableShell`); **always** requires approval and is audit-logged — can never be auto-approved |
+| `browser_navigate` / `browser_read` / `browser_click` / `browser_type` / `browser_screenshot` | Drive a shared headless Edge/Chrome window | Approval-gated by default (opt out via `toolPolicy.autoApprove`) |
+| `browser` | Legacy single-tool browser (action enum) | Runs freely |
+
+Sandboxed packs (`file_*`, `shell_exec`) refuse to touch anything outside the
+agent's `toolSandbox` directory (absolute paths and `..` escapes are rejected).
+Everything else — databases, SaaS APIs, anything — is available through
+**MCP servers** (`mcpServers` in `ernest.json`, stdio or HTTP); that is the
+escape hatch rather than adding unmaintainable built-ins.
+
+```json
+{
+  "agents": [
+    {
+      "name": "worker",
+      "provider": "mock",
+      "model": "mock-1",
+      "tools": ["file_read", "file_write", "file_list", "web_search", "shell_exec"],
+      "toolSandbox": "sandbox",
+      "toolPolicy": {
+        "enableShell": true,
+        "autoApprove": ["file_write"]
+      }
+    }
+  ]
+}
+```
 
 ## Quickstart
 
@@ -101,23 +141,98 @@ model (gpt-4o-mini via OpenRouter) and **the model decides delegation
 itself**; without a key it falls back to scripted mock providers, so it also
 runs offline and deterministically for demos and CI.
 
-### 4. Example apps
+### 4. Teams & workflows (config-driven)
+
+Declare multi-agent teams and DAG workflows in `ernest.json` — no Go code,
+no Python — then run them from the CLI or over HTTP:
+
+```json
+{
+  "agents": [
+    { "name": "lead", "provider": "mock", "model": "mock-1", "instructions": "You lead the team." },
+    { "name": "researcher", "provider": "mock", "model": "mock-1", "instructions": "You research." },
+    { "name": "writer", "provider": "mock", "model": "mock-1", "instructions": "You write." }
+  ],
+  "teams": [
+    {
+      "name": "editorial",
+      "process": "sequential",
+      "leader": "lead",
+      "members": ["researcher", "writer"]
+    }
+  ],
+  "workflows": [
+    {
+      "name": "pipeline",
+      "steps": [
+        { "name": "research", "agent": "researcher", "prompt": "Research {{input}}" },
+        { "name": "write", "agent": "writer", "prompt": "Write a report from {{research}}", "dependsOn": ["research"] }
+      ]
+    }
+  ]
+}
+```
+
+```bash
+./ernest.exe run -team editorial -input "plan the release"
+./ernest.exe run -workflow pipeline -input "quantum chips" --json
+```
+
+Teams stream `delegate.start/end` per member; workflows stream `step.start/end`
+and run independent steps concurrently, with optional LLM-judged `guard`s and
+`retries` per step. The same surfaces are exposed over HTTP
+(`GET /api/teams`, `GET /api/workflows`, `POST .../run` → SSE), the public Go
+packages (`team`, `workflow`), and the Python SDK/DSL. See
+[GUIDE.md §5](docs/GUIDE.md) and [PYTHON.md](docs/PYTHON.md).
+
+### 5. Example apps
 
 | App | What it shows | Dir |
 |---|---|---|
 | **Desk** | 3-agent team (lead → researcher, writer) with live delegation | `examples/desk` |
 | **Research Lab** | 4-agent PhD team (PI, reviewer, analyst, writer) + SSE dashboard UI | `examples/research-lab` |
 | **CLAW** | Local AI worker (files, shell, browser) with HITL approval UI | `examples/claw` |
+| **py-crew** | Crew authored in Python (DSL: agents + team + workflow), run on the Go engine | `examples/python-crew` |
 
-Each example is its own Go module and imports ernest from the published
-module path. With `OPENROUTER_API_KEY` set they run on a real model;
-without it they fall back to scripted mock providers.
+The Go examples are each their own module and import ernest from the
+published module path; `py-crew` runs through `python -m ernest`. With
+`OPENROUTER_API_KEY` set they run on a real model; without it they fall
+back to scripted mock providers.
 
-## Python SDK
+## Python
+
+ernest is Python-first: author crews in Python and run them on the Go engine,
+or drive a running server with the SDK.
 
 ```bash
 pip install ./python
 ```
+
+**Author in Python, run on Go** — the DSL compiles to `ernest.json` and
+executes on the same binary:
+
+```python
+# crew.py
+from ernest import Agent, Task, Crew
+
+researcher = Agent("researcher", provider="mock", instructions="You research topics.")
+writer = Agent("writer", provider="mock", instructions="You write clearly.")
+
+crew = Crew(
+    name="py-crew",
+    tasks=[
+        Task(researcher, "Research {{input}}", name="research"),
+        Task(writer, "Write from {{research}}", name="write", depends_on=["research"]),
+    ],
+)
+```
+
+```bash
+python -m ernest run crew.py --input "quantum chips" --json
+python -m ernest doctor crew.py --json      # validate + print compiled config
+```
+
+**Drive a running server** with the SDK:
 
 ```python
 from ernest import ErnestClient
@@ -127,6 +242,9 @@ for event in client.stream_chat("assistant", "What is 17 * 23?"):
     if event.type == "message.delta":
         print(event.delta, end="")
 ```
+
+Full DSL reference, `python -m ernest` usage and the SDK method list:
+[docs/PYTHON.md](docs/PYTHON.md).
 
 ## Performance — honest numbers
 
@@ -151,8 +269,10 @@ RAG pipelines.
 
 ## Documentation
 
-- [User guide](docs/GUIDE.md) — install → config → run → teams → eval → production
+- [User guide](docs/GUIDE.md) — install → config → run → teams/workflows → tools → eval → production
+- [Python](docs/PYTHON.md) — authoring DSL (`Agent`/`Task`/`Crew`/`Team`), `python -m ernest`, SDK clients
 - [Architecture](docs/ARCHITECTURE.md) — packages, wire format, event lifecycle
+- [Comparison](docs/COMPARISON.md) — ernest vs CrewAI, honest and dated
 - [Plan](PLAN.md) and [Test report](TEST.md) — development history & verification
 
 ## Status & honest limitations

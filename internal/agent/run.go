@@ -348,6 +348,7 @@ func (r *runner) executeOne(ctx context.Context, pc storage.PendingToolCall) (co
 		h(ctx, call)
 	}
 	tc := core.NewToolContext(r.agent.Name, r.runID)
+	tc.Sandbox = r.agent.ToolSandbox
 	if pc.ApprovalID != "" {
 		// Inject only this call's decision so RequestApproval resolves
 		// exactly one approval.

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -910,5 +911,207 @@ func TestHTTPRunnerDown(t *testing.T) {
 	runner := eval.HTTPRunner{Endpoint: "http://127.0.0.1:1", Agent: "x"} // nothing listens on :1
 	if _, err := eval.RunAll(context.Background(), runner, []eval.Scenario{{Name: "x", Input: "hi", Expect: eval.Expectation{Status: "completed"}}}); err == nil {
 		t.Fatal("expected connection error")
+	}
+}
+
+// newOrchestrationTestServer boots a server with a declared team
+// (hierarchical, scripted delegation) and a declared two-step workflow.
+func newOrchestrationTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	lead := agent.New("lead", llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
+		{ToolCalls: []core.ToolCall{{ID: "d1", Name: "delegate", Arguments: []byte(`{"member":"researcher","task":"research x"}`)}}, FinishReason: "tool_calls"},
+		{Content: "synthesised answer", FinishReason: "stop"},
+	}}))
+	researcher := agent.New("researcher", llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
+		{Content: "findings", FinishReason: "stop"},
+	}}))
+	writer := agent.New("writer", llm.NewMock(llm.MockConfig{}))
+	worker := agent.New("worker", llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
+		{Content: "step one output", FinishReason: "stop"},
+		{Content: "step two output", FinishReason: "stop"},
+	}}))
+
+	srv, err := New(Options{
+		Agents: []*agent.Agent{lead, researcher, writer, worker},
+		Teams: []TeamSpec{
+			{Name: "editorial", Description: "content team", Leader: "lead", Members: []string{"researcher", "writer"}, Process: "hierarchical"},
+		},
+		Workflows: []WorkflowSpec{
+			{Name: "pipeline", Description: "two-step DAG", Steps: []WorkflowStepSpec{
+				{Name: "research", Agent: "worker", Prompt: "research {{input}}"},
+				{Name: "write", Agent: "worker", Prompt: "write from {{research}}", DependsOn: []string{"research"}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		_ = srv.Close()
+	})
+	return ts
+}
+
+// readSSEUntilComplete POSTs the body and collects events until the
+// run.complete frame (or EOF).
+func readSSEUntilComplete(t *testing.T, url string, body string) []core.RunEvent {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d: %s", resp.StatusCode, data)
+	}
+	var events []core.RunEvent
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev core.RunEvent
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
+			t.Fatalf("bad event frame %q: %v", line, err)
+		}
+		events = append(events, ev)
+		if ev.Type == core.EventRunComplete {
+			break
+		}
+	}
+	return events
+}
+
+func TestTeamsEndpointRoundtrip(t *testing.T) {
+	ts := newOrchestrationTestServer(t)
+
+	resp, err := http.Get(ts.URL + "/api/teams")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var infos []teamInfo
+	if err := json.NewDecoder(resp.Body).Decode(&infos); err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("teams = %+v", infos)
+	}
+	if infos[0].Name != "editorial" || infos[0].Leader != "lead" || len(infos[0].Members) != 2 {
+		t.Fatalf("team info = %+v", infos[0])
+	}
+	if infos[0].Process != "hierarchical" {
+		t.Fatalf("process = %q", infos[0].Process)
+	}
+}
+
+func TestTeamRunEndpointSSE(t *testing.T) {
+	ts := newOrchestrationTestServer(t)
+	events := readSSEUntilComplete(t, ts.URL+"/api/teams/editorial/run", `{"input":"research x"}`)
+
+	var sawDelegate bool
+	var complete *core.RunResult
+	for _, ev := range events {
+		if ev.Type == core.EventDelegateStart && ev.Agent == "researcher" {
+			sawDelegate = true
+		}
+		if ev.Type == core.EventRunComplete {
+			complete = ev.Result
+		}
+	}
+	if !sawDelegate {
+		t.Fatalf("delegation event missing: %+v", events)
+	}
+	if complete == nil || complete.Status != core.RunStatusCompleted {
+		t.Fatalf("complete = %+v", complete)
+	}
+}
+
+func TestWorkflowsEndpointRoundtrip(t *testing.T) {
+	ts := newOrchestrationTestServer(t)
+
+	resp, err := http.Get(ts.URL + "/api/workflows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var infos []workflowInfo
+	if err := json.NewDecoder(resp.Body).Decode(&infos); err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 || infos[0].Name != "pipeline" || len(infos[0].Steps) != 2 {
+		t.Fatalf("workflows = %+v", infos)
+	}
+}
+
+func TestWorkflowRunEndpointSSE(t *testing.T) {
+	ts := newOrchestrationTestServer(t)
+	events := readSSEUntilComplete(t, ts.URL+"/api/workflows/pipeline/run", `{"input":"go"}`)
+
+	var complete *core.RunResult
+	for _, ev := range events {
+		if ev.Type == core.EventRunComplete {
+			complete = ev.Result
+		}
+	}
+	if complete == nil || complete.Status != core.RunStatusCompleted {
+		t.Fatalf("complete = %+v", complete)
+	}
+	if !strings.Contains(complete.Output, "\"research\"") || !strings.Contains(complete.Output, "\"write\"") {
+		t.Fatalf("output = %s", complete.Output)
+	}
+}
+
+func TestOrchestrationEndpointsErrors(t *testing.T) {
+	ts := newOrchestrationTestServer(t)
+
+	// Unknown names 404.
+	for _, url := range []string{ts.URL + "/api/teams/ghost/run", ts.URL + "/api/workflows/ghost/run"} {
+		resp, err := http.Post(url, "application/json", strings.NewReader(`{"input":"hi"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s status = %d", url, resp.StatusCode)
+		}
+	}
+
+	// Empty input is a bad request.
+	resp, err := http.Post(ts.URL+"/api/teams/editorial/run", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	// Building a team with an unknown member fails server construction.
+	_, err = New(Options{
+		Agents: []*agent.Agent{agent.New("only", llm.NewMock(llm.MockConfig{}))},
+		Teams:  []TeamSpec{{Name: "bad", Leader: "only", Members: []string{"ghost"}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown member") {
+		t.Fatalf("err = %v", err)
+	}
+
+	// A workflow referencing an unknown agent fails server construction.
+	_, err = New(Options{
+		Agents:    []*agent.Agent{agent.New("only", llm.NewMock(llm.MockConfig{}))},
+		Workflows: []WorkflowSpec{{Name: "bad", Steps: []WorkflowStepSpec{{Name: "s", Agent: "ghost"}}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown agent") {
+		t.Fatalf("err = %v", err)
 	}
 }

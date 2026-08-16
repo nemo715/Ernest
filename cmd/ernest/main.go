@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/nemo715/Ernest/internal/mcp"
 	"github.com/nemo715/Ernest/internal/server"
 	"github.com/nemo715/Ernest/internal/storage"
+	"github.com/nemo715/Ernest/internal/team"
 )
 
 const version = "0.1.7"
@@ -207,11 +209,12 @@ var newTemplates = map[string]struct {
   "agents": [
     {
       "name": "assistant",
-      "description": "General assistant with calculator, fetch and time tools",
+      "description": "General assistant with calculator, fetch, search and sandboxed file tools",
       "provider": "mock",
       "model": "mock-1",
       "instructions": "You are a helpful assistant. Use tools when they help.",
-      "tools": ["calculator", "http_fetch", "now"],
+      "tools": ["calculator", "http_fetch", "now", "web_search", "file_read", "file_list"],
+      "toolSandbox": "sandbox",
       "memory": true
     }
   ],
@@ -285,6 +288,15 @@ func main() {
       "tools": []
     }
   ],
+  "teams": [
+    {
+      "name": "editorial",
+      "description": "Leader delegates to specialist members",
+      "leader": "lead",
+      "members": ["researcher", "writer"],
+      "process": "hierarchical"
+    }
+  ],
   "store": { "type": "sqlite", "dsn": "ernest.db" }
 }
 `,
@@ -292,63 +304,43 @@ func main() {
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 
 	"github.com/nemo715/Ernest/agent"
+	"github.com/nemo715/Ernest/config"
 	"github.com/nemo715/Ernest/core"
-	"github.com/nemo715/Ernest/llm"
-	"github.com/nemo715/Ernest/team"
 )
 
-// A multi-agent team: the leader decides when to delegate, using the
-// delegate tool that team.New injects automatically.
+// Config-driven team: this main.go loads ernest.json through the public
+// config API and runs the "editorial" team declared there. The same
+// team also runs with no Go code at all:
 //
-// With OPENROUTER_API_KEY set, the team runs on a real model
-// (gpt-4o-mini via OpenRouter) and the model decides delegation itself.
-// Without a key it falls back to scripted mock providers, so the scaffold
-// also runs offline and deterministically for demos and CI.
+//	ernest run --team editorial --input "Research Go concurrency"
+//
+// The leader delegates through the delegate tool that the team engine
+// injects automatically. With OPENROUTER_API_KEY set, agents run on a
+// real model (gpt-4o-mini via OpenRouter) and the model decides when to
+// delegate. Without a key they fall back to mock providers, so the
+// scaffold also runs offline and deterministically for demos and CI.
 func main() {
-	var leadP, researchP, writerP llm.Provider
-	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
-		cfg := llm.OpenAICompatConfig{
-			BaseURL: "https://openrouter.ai/api/v1",
-			APIKey:  key,
-			Model:   "openai/gpt-4o-mini",
-		}
-		leadP = llm.NewOpenAICompat(cfg)
-		researchP = llm.NewOpenAICompat(cfg)
-		writerP = llm.NewOpenAICompat(cfg)
-	} else {
-		fmt.Println("· no OPENROUTER_API_KEY — scripted mock demo (set the key for a real model)")
-		leadP = llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
-			{ToolCalls: []core.ToolCall{{
-				Name: "delegate",
-				Arguments: json.RawMessage("{\"member\":\"researcher\",\"task\":\"Research Go concurrency and report your findings.\"}"),
-			}}},
-			{Content: "Done. I delegated the research and synthesised the findings into a short summary.", FinishReason: "stop"},
-		}})
-		researchP = llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{
-			{Content: "Findings: Go concurrency is built on goroutines (cheap, multiplexed threads) and channels for safe communication; 'go f()' starts a goroutine, 'select' coordinates many.", FinishReason: "stop"},
-		}})
-		writerP = llm.NewMock(llm.MockConfig{})
+	cfg, err := config.Load("ernest.json")
+	if err != nil {
+		panic(err)
+	}
+	rt, err := config.Build(cfg, nil)
+	if err != nil {
+		panic(err)
+	}
+	defer rt.Close()
+
+	t := rt.Teams["editorial"]
+	if t == nil {
+		fmt.Fprintln(os.Stderr, "team \"editorial\" not declared in ernest.json")
+		os.Exit(1)
 	}
 
-	leader := agent.New("lead", leadP)
-	leader.Instructions = "You coordinate the team and delegate tasks."
-	leader.Tools = core.BuiltinTools
-
-	researcherAgent := agent.New("researcher", researchP)
-	researcherAgent.Description = "Finds facts and figures"
-	researcherAgent.Instructions = "You research topics and report findings."
-
-	writerAgent := agent.New("writer", writerP)
-	writerAgent.Description = "Turns notes into polished text"
-	writerAgent.Instructions = "You write clear, concise prose."
-
-	t := team.New("editorial", leader, researcherAgent, writerAgent)
-	ch, err := t.Stream(context.Background(), "Research Go concurrency and write a short summary.", team.RunOptions{})
+	ch, err := t.Stream(context.Background(), "Research Go concurrency and write a short summary.", agent.RunOptions{})
 	if err != nil {
 		panic(err)
 	}
@@ -384,6 +376,26 @@ func main() {
       "memory": true
     }
   ],
+  "workflows": [
+    {
+      "name": "pipeline",
+      "description": "Two-step DAG: research, then write from the findings",
+      "steps": [
+        {
+          "name": "research",
+          "agent": "assistant",
+          "prompt": "Research: {{input}}. Return two or three concrete facts.",
+          "retries": 2
+        },
+        {
+          "name": "write",
+          "agent": "assistant",
+          "prompt": "Write a one-paragraph summary based on these findings:\n{{research}}",
+          "dependsOn": ["research"]
+        }
+      ]
+    }
+  ],
   "store": { "type": "sqlite", "dsn": "ernest.db" }
 }
 `,
@@ -392,51 +404,37 @@ func main() {
 import (
 	"context"
 	"fmt"
+	"os"
 
-	"github.com/nemo715/Ernest/agent"
-	"github.com/nemo715/Ernest/llm"
-	"github.com/nemo715/Ernest/workflow"
+	"github.com/nemo715/Ernest/config"
 )
 
-// A step DAG: plan -> research (via the agent) -> write. Steps share
-// state; independent steps would run concurrently.
+// Config-driven workflow: this main.go loads ernest.json through the
+// public config API and runs the "pipeline" workflow declared there
+// (research -> write; prompts share state via {{...}} variables).
+// The same workflow also runs with no Go code at all:
+//
+//	ernest run --workflow pipeline --input "Go concurrency"
+//
+// Steps support guards: an LLM judge scores a step's output against a
+// rubric. Add "guard": {"rubric": "...", "minScore": 0.7} to a step in
+// ernest.json. The mock provider cannot judge, so guarded steps need a
+// real (or scripted) model.
 func main() {
-	p := llm.NewMock(llm.MockConfig{})
-	a := agent.New("assistant", p)
-	a.Instructions = "You are a precise worker."
+	cfg, err := config.Load("ernest.json")
+	if err != nil {
+		panic(err)
+	}
+	rt, err := config.Build(cfg, nil)
+	if err != nil {
+		panic(err)
+	}
+	defer rt.Close()
 
-	wf := workflow.New("pipeline")
-	wf.Agents = map[string]*agent.Agent{"assistant": a}
-	wf.Steps = []*workflow.Step{
-		{
-			Name: "plan",
-			Run: func(ctx *workflow.StepContext) error {
-				ctx.Log("planning %v", ctx.Input())
-				ctx.Set("plan", "research -> write")
-				return nil
-			},
-		},
-		{
-			Name:      "research",
-			DependsOn: []string{"plan"},
-			Run: func(ctx *workflow.StepContext) error {
-				res, err := ctx.Agent("assistant").Chat(ctx.Ctx, "Research: Go concurrency",
-					agent.RunOptions{SessionID: ctx.RunID + ":research"})
-				if err != nil {
-					return err
-				}
-				ctx.Set("notes", res.Output)
-				return nil
-			},
-		},
-		{
-			Name:      "write",
-			DependsOn: []string{"research"},
-			Run: func(ctx *workflow.StepContext) error {
-				fmt.Println("notes:", ctx.Get("notes"))
-				return nil
-			},
-		},
+	wf := rt.Workflows["pipeline"]
+	if wf == nil {
+		fmt.Fprintln(os.Stderr, "workflow \"pipeline\" not declared in ernest.json")
+		os.Exit(1)
 	}
 
 	res, err := wf.Run(context.Background(), "a two-paragraph intro to Go")
@@ -582,6 +580,8 @@ func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cfgPath := fs.String("config", config.DefaultFile, "path to ernest.json")
 	agentName := fs.String("agent", "", "agent name (default: first agent)")
+	teamName := fs.String("team", "", "run the named team from ernest.json instead of a single agent")
+	workflowName := fs.String("workflow", "", "run the named workflow from ernest.json instead of a single agent")
 	input := fs.String("input", "", "one-shot input; without it ernest reads lines from stdin")
 	session := fs.String("session", "", "session id for memory continuity")
 	asJSON := fs.Bool("json", false, "print the full run result as JSON")
@@ -601,12 +601,41 @@ func cmdRun(args []string) error {
 	}
 	defer rt.Close()
 
+	ctx := context.Background()
+	if *teamName != "" {
+		t := rt.Teams[*teamName]
+		if t == nil {
+			return fmt.Errorf("team %q not found (have: %s)", *teamName, teamNames(rt.Teams))
+		}
+		if *input == "" {
+			return fmt.Errorf("--input is required with --team")
+		}
+		res, err := t.Chat(ctx, *input, agent.RunOptions{SessionID: *session, SkipMemory: *noMemory})
+		if err != nil {
+			return err
+		}
+		return printResult(res, *asJSON)
+	}
+	if *workflowName != "" {
+		wf := rt.Workflows[*workflowName]
+		if wf == nil {
+			return fmt.Errorf("workflow %q not found (have: %s)", *workflowName, workflowNames(rt))
+		}
+		if *input == "" {
+			return fmt.Errorf("--input is required with --workflow")
+		}
+		res, err := wf.Run(ctx, *input)
+		if err != nil {
+			return err
+		}
+		return printResult(res, *asJSON)
+	}
+
 	ag := pickAgent(rt.Agents, *agentName)
 	if ag == nil {
 		return fmt.Errorf("agent %q not found (have: %s)", *agentName, agentNames(rt.Agents))
 	}
 
-	ctx := context.Background()
 	if *input != "" {
 		res, err := runOnce(ctx, ag, *input, *session, *noMemory)
 		if err != nil {
@@ -731,6 +760,75 @@ func agentNames(agents []*agent.Agent) string {
 		names = append(names, a.Name)
 	}
 	return strings.Join(names, ", ")
+}
+
+// teamNames joins the configured team names for error messages.
+func teamNames(teams map[string]*team.Team) string {
+	names := make([]string, 0, len(teams))
+	for n := range teams {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// workflowNames joins the configured workflow names for error messages.
+func workflowNames(rt *config.Runtime) string {
+	names := make([]string, 0, len(rt.Workflows))
+	for n := range rt.Workflows {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// teamsToServerSpecs converts config team declarations to server specs
+// (the server rebuilds teams from its own audit-wrapped agents).
+func teamsToServerSpecs(cfg *config.Config) []server.TeamSpec {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]server.TeamSpec, 0, len(cfg.Teams))
+	for _, t := range cfg.Teams {
+		out = append(out, server.TeamSpec{
+			Name:          t.Name,
+			Description:   t.Description,
+			Leader:        t.Leader,
+			Members:       t.Members,
+			Process:       t.Process,
+			MaxIterations: t.MaxIterations,
+			Instructions:  t.Instructions,
+		})
+	}
+	return out
+}
+
+// workflowsToServerSpecs converts config workflow declarations to
+// server specs (steps keep agent/prompt/guard so the server can build
+// runnable workflows).
+func workflowsToServerSpecs(cfg *config.Config) []server.WorkflowSpec {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]server.WorkflowSpec, 0, len(cfg.Workflows))
+	for _, w := range cfg.Workflows {
+		steps := make([]server.WorkflowStepSpec, 0, len(w.Steps))
+		for _, s := range w.Steps {
+			sp := server.WorkflowStepSpec{
+				Name:      s.Name,
+				Agent:     s.Agent,
+				Prompt:    s.Prompt,
+				DependsOn: s.DependsOn,
+				Retries:   s.Retries,
+			}
+			if s.Guard != nil {
+				sp.Guard = &server.GuardSpec{Rubric: s.Guard.Rubric, MinScore: s.Guard.MinScore}
+			}
+			steps = append(steps, sp)
+		}
+		out = append(out, server.WorkflowSpec{Name: w.Name, Description: w.Description, Steps: steps, MaxRetries: w.MaxRetries})
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,7 +1290,9 @@ func cmdPlayground(args []string) error {
 	}
 
 	var rt *config.Runtime
+	var cfg *config.Config
 	var failuresPath string
+	var err error
 	if *demo {
 		// Self-contained demo: mock agent + in-memory store, no keys.
 		temp := 0.7
@@ -1211,13 +1311,12 @@ func cmdPlayground(args []string) error {
 			},
 			Store: config.StoreConfig{Type: "memory"},
 		}
-		var err error
 		rt, err = demoCfg.Build(nil)
 		if err != nil {
 			return err
 		}
 	} else {
-		cfg, err := config.Load(*cfgPath)
+		cfg, err = config.Load(*cfgPath)
 		if err != nil {
 			return err
 		}
@@ -1229,7 +1328,14 @@ func cmdPlayground(args []string) error {
 	}
 	defer rt.Close()
 
-	srv, err := server.New(server.Options{Agents: rt.Agents, Store: rt.Store, Static: *static, FailuresPath: failuresPath})
+	srv, err := server.New(server.Options{
+		Agents:       rt.Agents,
+		Store:        rt.Store,
+		Static:       *static,
+		FailuresPath: failuresPath,
+		Teams:        teamsToServerSpecs(cfg),
+		Workflows:    workflowsToServerSpecs(cfg),
+	})
 	if err != nil {
 		return err
 	}
@@ -1285,8 +1391,16 @@ func cmdDoctor(args []string) error {
 	if err != nil {
 		check("config", "", err)
 	} else {
-		check("config", fmt.Sprintf("OK %s (%d agents, %d mcp servers)", *cfgPath, len(cfg.Agents), len(cfg.MCPServers)), nil)
+		check("config", fmt.Sprintf("OK %s (%d agents, %d teams, %d workflows, %d mcp servers)", *cfgPath, len(cfg.Agents), len(cfg.Teams), len(cfg.Workflows), len(cfg.MCPServers)), nil)
 		for _, ac := range cfg.Agents {
+			// Honest guardrail reminder: shell_exec is approval-gated and
+			// audit-logged by design — a WARN, not a failure.
+			for _, t := range ac.Tools {
+				if t == core.ToolShellExec {
+					check("agent "+ac.Name+" policy", "WARN shell_exec enabled — every command always requires human approval and is audit-logged in the run trace", nil)
+					break
+				}
+			}
 			if strings.EqualFold(ac.Provider, "mock") {
 				check("agent "+ac.Name, "OK mock provider (no key needed)", nil)
 				continue
@@ -1304,6 +1418,16 @@ func cmdDoctor(args []string) error {
 				continue
 			}
 			check("agent "+ac.Name, "OK "+ac.Provider+" ("+keyEnv+" set)", nil)
+		}
+		for _, t := range cfg.Teams {
+			process := t.Process
+			if process == "" {
+				process = "hierarchical"
+			}
+			check("team "+t.Name, fmt.Sprintf("OK %s -> [%s] (%s)", t.Leader, strings.Join(t.Members, ", "), process), nil)
+		}
+		for _, w := range cfg.Workflows {
+			check("workflow "+w.Name, fmt.Sprintf("OK %d steps", len(w.Steps)), nil)
 		}
 		for _, mc := range cfg.MCPServers {
 			if mc.Transport == "http" {

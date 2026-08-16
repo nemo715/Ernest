@@ -169,3 +169,93 @@ func TestTeamDoesNotMutateLeader(t *testing.T) {
 		t.Fatal("leader instructions mutated")
 	}
 }
+
+func TestTeamSequentialChainsOutputs(t *testing.T) {
+	p1 := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{{Content: "step one output", FinishReason: "stop"}}})
+	p2 := llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{{Content: "step two output", FinishReason: "stop"}}})
+	first := agent.New("first", p1)
+	second := agent.New("second", p2)
+
+	tm := New("chain", nil, first, second)
+	tm.Process = "sequential"
+
+	res, err := tm.Chat(context.Background(), "start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != core.RunStatusCompleted {
+		t.Fatalf("status = %s (%s)", res.Status, res.Error)
+	}
+	// The final output is the last member's output.
+	if res.Output != "step two output" {
+		t.Fatalf("output = %q", res.Output)
+	}
+	// The second member received the first member's output as input.
+	if len(p2.Requests) != 1 || len(p2.Requests[0].Messages) == 0 {
+		t.Fatalf("second member requests = %+v", p2.Requests)
+	}
+	var user string
+	for _, m := range p2.Requests[0].Messages {
+		if m.Role == core.RoleUser {
+			user = m.Content
+		}
+	}
+	if user != "step one output" {
+		t.Fatalf("second member input = %q, want %q", user, "step one output")
+	}
+	// The leader model was never called in sequential mode.
+	if got := res.Metadata["process"]; got != "sequential" {
+		t.Fatalf("process metadata = %v", got)
+	}
+}
+
+func TestTeamSequentialStreamsDelegateEvents(t *testing.T) {
+	first := agent.New("first", llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{{Content: "a", FinishReason: "stop"}}}))
+	second := agent.New("second", llm.NewMock(llm.MockConfig{Script: []llm.MockTurn{{Content: "b", FinishReason: "stop"}}}))
+	tm := New("chain", nil, first, second)
+	tm.Process = "sequential"
+
+	ch, err := tm.Stream(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var types []core.EventType
+	var starts, ends int
+	var lastResult *core.RunResult
+	for ev := range ch {
+		types = append(types, ev.Type)
+		switch ev.Type {
+		case core.EventDelegateStart:
+			starts++
+		case core.EventDelegateEnd:
+			ends++
+		case core.EventRunComplete:
+			lastResult = ev.Result
+		}
+	}
+	if starts != 2 || ends != 2 {
+		t.Fatalf("delegate events: starts=%d ends=%d (%v)", starts, ends, types)
+	}
+	if len(types) == 0 || types[0] != core.EventRunStart {
+		t.Fatalf("first event = %v", types)
+	}
+	if types[len(types)-1] != core.EventRunComplete {
+		t.Fatalf("last event = %v", types[len(types)-1])
+	}
+	if lastResult == nil || lastResult.Output != "b" {
+		t.Fatalf("final result = %+v", lastResult)
+	}
+	// Metadata carries the member names in declaration order.
+	names, ok := lastResult.Metadata["members"].([]string)
+	if !ok || len(names) != 2 || names[0] != "first" || names[1] != "second" {
+		t.Fatalf("members metadata = %+v", lastResult.Metadata["members"])
+	}
+}
+
+func TestTeamSequentialNoMembers(t *testing.T) {
+	tm := New("empty", nil)
+	tm.Process = "sequential"
+	if _, err := tm.Chat(context.Background(), "hi"); err == nil {
+		t.Fatal("sequential team without members must error")
+	}
+}
